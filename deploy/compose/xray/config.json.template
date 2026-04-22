@@ -1,0 +1,90 @@
+{
+  "log": {
+    "loglevel": "info"
+  },
+
+  "api": {
+    "tag": "api",
+    "services": [
+      "HandlerService",
+      "StatsService",
+      "LoggerService"
+    ]
+  },
+
+  "stats": {},
+
+  "policy": {
+    "levels": {
+      "0": {
+        "statsUserUplink": true,
+        "statsUserDownlink": true
+      }
+    },
+    "system": {
+      "statsInboundUplink": true,
+      "statsInboundDownlink": true,
+      "statsOutboundUplink": true,
+      "statsOutboundDownlink": true
+    }
+  },
+
+  "routing": {
+    "rules": [
+      {
+        "type": "field",
+        "inboundTag": ["api"],
+        "outboundTag": "api"
+      }
+    ]
+  },
+
+  "inbounds": [
+    {
+      "tag": "api",
+      "listen": "0.0.0.0",
+      "port": ${VPN_XRAY_API_PORT},
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "127.0.0.1"
+      }
+    },
+    {
+      "tag": "${VPN_XRAY_INBOUND_TAG}",
+      "listen": "0.0.0.0",
+      "port": ${VPN_XRAY_VLESS_PORT},
+      "protocol": "vless",
+      "settings": {
+        "clients": [],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "dest": "${VPN_XRAY_REALITY_DEST}",
+          "xver": 0,
+          "serverNames": ["${VPN_XRAY_REALITY_SNI}"],
+          "privateKey": "${VPN_XRAY_REALITY_PRIVATE_KEY}",
+          "shortIds": ["${VPN_XRAY_REALITY_SHORT_ID}"]
+        }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls", "quic"]
+      }
+    }
+  ],
+
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "tag": "direct"
+    },
+    {
+      "protocol": "blackhole",
+      "tag": "blocked"
+    }
+  ]
+}

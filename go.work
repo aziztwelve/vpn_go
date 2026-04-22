@@ -1,0 +1,12 @@
+go 1.26.0
+
+toolchain go1.26.2
+
+use (
+	./platform
+	./services/auth-service
+	./services/gateway
+	./services/subscription-service
+	./services/vpn-service
+	./shared
+)

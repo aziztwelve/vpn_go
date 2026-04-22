@@ -1,0 +1,113 @@
+syntax = "proto3";
+
+package vpn.v1;
+
+option go_package = "github.com/vpn/shared/pkg/proto/vpn/v1";
+
+service VPNService {
+  // Создать VPN пользователя (после покупки подписки)
+  rpc CreateVPNUser(CreateVPNUserRequest) returns (CreateVPNUserResponse);
+  
+  // Получить VPN пользователя
+  rpc GetVPNUser(GetVPNUserRequest) returns (GetVPNUserResponse);
+  
+  // Получить VLESS ссылку для подключения
+  rpc GetVLESSLink(GetVLESSLinkRequest) returns (GetVLESSLinkResponse);
+  
+  // Получить список серверов
+  rpc ListServers(ListServersRequest) returns (ListServersResponse);
+  
+  // Получить активные подключения пользователя
+  rpc GetActiveConnections(GetActiveConnectionsRequest) returns (GetActiveConnectionsResponse);
+  
+  // Отключить устройство
+  rpc DisconnectDevice(DisconnectDeviceRequest) returns (DisconnectDeviceResponse);
+}
+
+message CreateVPNUserRequest {
+  int64 user_id = 1;
+  int64 subscription_id = 2;
+}
+
+message CreateVPNUserResponse {
+  VPNUser vpn_user = 1;
+}
+
+message GetVPNUserRequest {
+  int64 user_id = 1;
+}
+
+message GetVPNUserResponse {
+  VPNUser vpn_user = 1;
+}
+
+message GetVLESSLinkRequest {
+  int64 user_id = 1;
+  int32 server_id = 2;
+}
+
+message GetVLESSLinkResponse {
+  string vless_link = 1;
+  Server server = 2;
+}
+
+message ListServersRequest {
+  bool active_only = 1;
+}
+
+message ListServersResponse {
+  repeated Server servers = 1;
+}
+
+message GetActiveConnectionsRequest {
+  int64 user_id = 1;
+}
+
+message GetActiveConnectionsResponse {
+  repeated ActiveConnection connections = 1;
+  int32 total_connections = 2;
+  int32 max_devices = 3;
+}
+
+message DisconnectDeviceRequest {
+  int64 connection_id = 1;
+}
+
+message DisconnectDeviceResponse {
+  bool success = 1;
+}
+
+message VPNUser {
+  int64 id = 1;
+  int64 user_id = 2;
+  int64 subscription_id = 3;
+  string uuid = 4;
+  string email = 5;
+  string flow = 6;
+  string created_at = 7;
+}
+
+message Server {
+  int32 id = 1;
+  string name = 2;
+  string location = 3;
+  string country_code = 4;
+  string host = 5;
+  int32 port = 6;
+  string public_key = 7;
+  string short_id = 8;
+  string dest = 9;
+  string server_names = 10;
+  bool is_active = 11;
+  int32 load_percent = 12;
+}
+
+message ActiveConnection {
+  int64 id = 1;
+  int64 vpn_user_id = 2;
+  int32 server_id = 3;
+  string server_name = 4;
+  string device_identifier = 5;
+  string connected_at = 6;
+  string last_seen = 7;
+}

@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package auth.v1;
+
+option go_package = "github.com/vpn/shared/pkg/proto/auth/v1";
+
+service AuthService {
+  // Валидация Telegram initData и создание/обновление пользователя
+  rpc ValidateTelegramUser(ValidateTelegramUserRequest) returns (ValidateTelegramUserResponse);
+  
+  // Получение информации о пользователе
+  rpc GetUser(GetUserRequest) returns (GetUserResponse);
+  
+  // Обновление роли пользователя (только для админов)
+  rpc UpdateUserRole(UpdateUserRoleRequest) returns (UpdateUserRoleResponse);
+  
+  // Бан/разбан пользователя (только для админов)
+  rpc BanUser(BanUserRequest) returns (BanUserResponse);
+  
+  // Проверка JWT токена
+  rpc VerifyToken(VerifyTokenRequest) returns (VerifyTokenResponse);
+}
+
+message ValidateTelegramUserRequest {
+  string init_data = 1; // Telegram WebApp initData
+}
+
+message ValidateTelegramUserResponse {
+  User user = 1;
+  string jwt_token = 2; // JWT для внутренней авторизации
+}
+
+message GetUserRequest {
+  int64 user_id = 1;
+}
+
+message GetUserResponse {
+  User user = 1;
+}
+
+message UpdateUserRoleRequest {
+  int64 user_id = 1;
+  string role = 2; // user, partner, admin
+}
+
+message UpdateUserRoleResponse {
+  User user = 1;
+}
+
+message BanUserRequest {
+  int64 user_id = 1;
+  bool is_banned = 2;
+}
+
+message BanUserResponse {
+  User user = 1;
+}
+
+message VerifyTokenRequest {
+  string token = 1;
+}
+
+message VerifyTokenResponse {
+  int64 user_id = 1;
+  string role = 2;
+  bool is_valid = 3;
+}
+
+message User {
+  int64 id = 1;
+  int64 telegram_id = 2;
+  string username = 3;
+  string first_name = 4;
+  string last_name = 5;
+  string photo_url = 6;
+  string language_code = 7;
+  string role = 8;
+  bool is_banned = 9;
+  string balance = 10; // Decimal as string
+  string created_at = 11;
+  string updated_at = 12;
+  string last_active_at = 13;
+}

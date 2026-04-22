@@ -1,0 +1,289 @@
+version: '3'
+
+vars:
+  SERVICES_DIR: ./services
+  BIN_DIR: ./bin
+  PROTO_DIR: ./shared/proto
+  PROTO_OUT_DIR: ./shared/pkg/proto
+  COMPOSE_FILE: ./deploy/compose/docker-compose.yml
+  ENV_DIR: ./deploy/env
+  MASTER_ENV: ./deploy/env/.env
+  ENVSUBST_VERSION: 'v1.4.3'
+  ENVSUBST: ./bin/envsubst
+  SERVICES: 'auth,sub,vpn,gateway'
+
+tasks:
+  # ==================== ENV MANAGEMENT ====================
+
+  env:install-envsubst:
+    desc: "Install envsubst (github.com/a8m/envsubst) into ./bin"
+    cmds:
+      - |
+        mkdir -p {{.BIN_DIR}}
+        if [ ! -x {{.ENVSUBST}} ]; then
+          echo "📦 Installing envsubst {{.ENVSUBST_VERSION}}..."
+          GOBIN=$(pwd)/{{.BIN_DIR}} go install github.com/a8m/envsubst/cmd/envsubst@{{.ENVSUBST_VERSION}}
+        fi
+    status:
+      - test -x {{.ENVSUBST}}
+
+  env:generate:
+    desc: "Generate per-service .env files from deploy/env/.env + <svc>.env.template"
+    deps: [env:install-envsubst]
+    cmds:
+      - |
+        if [ ! -f {{.MASTER_ENV}} ]; then
+          echo "🔄 Creating {{.MASTER_ENV}} from template"
+          cp {{.ENV_DIR}}/.env.template {{.MASTER_ENV}}
+        fi
+      - SERVICES={{.SERVICES}} ENV_SUBST=$(pwd)/{{.ENVSUBST}} bash {{.ENV_DIR}}/generate-env.sh
+
+  env:show:
+    desc: "Print master .env (gitignored)"
+    cmds:
+      - cat {{.MASTER_ENV}}
+
+  # ==================== DEV (host) ====================
+
+  dev:auth:
+    desc: Run auth-service locally (reads deploy/env/auth.env)
+    deps: [env:generate]
+    dir: "{{.SERVICES_DIR}}/auth-service"
+    dotenv: ['../../deploy/env/auth.env']
+    cmds:
+      - go run cmd/main/main.go
+
+  dev:sub:
+    desc: Run subscription-service locally (reads deploy/env/sub.env)
+    deps: [env:generate]
+    dir: "{{.SERVICES_DIR}}/subscription-service"
+    dotenv: ['../../deploy/env/sub.env']
+    cmds:
+      - go run cmd/main/main.go
+
+  dev:vpn:
+    desc: Run vpn-service locally (reads deploy/env/vpn.env)
+    deps: [env:generate]
+    dir: "{{.SERVICES_DIR}}/vpn-service"
+    dotenv: ['../../deploy/env/vpn.env']
+    cmds:
+      - go run cmd/main/main.go
+
+  dev:gateway:
+    desc: Run gateway locally (reads deploy/env/gateway.env)
+    deps: [env:generate]
+    dir: "{{.SERVICES_DIR}}/gateway"
+    dotenv: ['../../deploy/env/gateway.env']
+    cmds:
+      - go run cmd/main/main.go
+
+  # ==================== BUILD ====================
+
+  build:auth:
+    desc: Build auth-service binary
+    dir: "{{.SERVICES_DIR}}/auth-service"
+    cmds:
+      - go build -o ../../{{.BIN_DIR}}/auth-service cmd/main/main.go
+
+  build:sub:
+    desc: Build subscription-service binary
+    dir: "{{.SERVICES_DIR}}/subscription-service"
+    cmds:
+      - go build -o ../../{{.BIN_DIR}}/subscription-service cmd/main/main.go
+
+  build:vpn:
+    desc: Build vpn-service binary
+    dir: "{{.SERVICES_DIR}}/vpn-service"
+    cmds:
+      - go build -o ../../{{.BIN_DIR}}/vpn-service cmd/main/main.go
+
+  build:gateway:
+    desc: Build gateway binary
+    dir: "{{.SERVICES_DIR}}/gateway"
+    cmds:
+      - go build -o ../../{{.BIN_DIR}}/gateway cmd/main/main.go
+
+  build-all:
+    desc: Build all services
+    cmds:
+      - task: build:auth
+      - task: build:sub
+      - task: build:vpn
+      - task: build:gateway
+
+  # ==================== RUN FROM BINARY ====================
+
+  run-bin:auth:
+    desc: Run auth-service from binary (uses deploy/env/auth.env)
+    deps: [env:generate]
+    dotenv: ['{{.ENV_DIR}}/auth.env']
+    cmds:
+      - ./{{.BIN_DIR}}/auth-service
+
+  run-bin:sub:
+    desc: Run subscription-service from binary
+    deps: [env:generate]
+    dotenv: ['{{.ENV_DIR}}/sub.env']
+    cmds:
+      - ./{{.BIN_DIR}}/subscription-service
+
+  run-bin:vpn:
+    desc: Run vpn-service from binary
+    deps: [env:generate]
+    dotenv: ['{{.ENV_DIR}}/vpn.env']
+    cmds:
+      - ./{{.BIN_DIR}}/vpn-service
+
+  run-bin:gateway:
+    desc: Run gateway from binary
+    deps: [env:generate]
+    dotenv: ['{{.ENV_DIR}}/gateway.env']
+    cmds:
+      - ./{{.BIN_DIR}}/gateway
+
+  stop-all:
+    desc: Stop all locally running services
+    cmds:
+      - pkill -f "bin/gateway"              || true
+      - pkill -f "bin/auth-service"         || true
+      - pkill -f "bin/subscription-service" || true
+      - pkill -f "bin/vpn-service"          || true
+
+  # ==================== PROTO ====================
+
+  proto:gen:
+    desc: Generate Go code from proto files
+    cmds:
+      - mkdir -p {{.PROTO_OUT_DIR}}
+      - |
+        for proto in {{.PROTO_DIR}}/**/*.proto; do
+          protoc --go_out={{.PROTO_OUT_DIR}} --go_opt=paths=source_relative \
+                 --go-grpc_out={{.PROTO_OUT_DIR}} --go-grpc_opt=paths=source_relative \
+                 -I={{.PROTO_DIR}} $proto
+        done
+
+  # ==================== COMPOSE ====================
+
+  compose:up:
+    desc: Start full dev stack (postgres + migrate + 4 services)
+    deps: [env:generate]
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} up -d --build
+
+  compose:down:
+    desc: Stop full dev stack
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} down
+
+  compose:down-v:
+    desc: Stop stack AND remove postgres volume (wipes DB)
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} down -v
+
+  compose:logs:
+    desc: Tail logs of the full stack
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} logs -f
+
+  compose:ps:
+    desc: Show status of the stack
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} ps
+
+  compose:rebuild:
+    desc: Rebuild all service images from scratch
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} build --no-cache
+
+  # ==================== XRAY ====================
+
+  xray:up:
+    desc: Start only the Xray container (needs postgres network to exist → compose:up первее, либо task xray:up поднимет весь стек)
+    deps: [env:generate]
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} up -d xray
+
+  xray:restart:
+    desc: Restart Xray container (apply new config.json)
+    deps: [env:generate]
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} restart xray
+
+  xray:logs:
+    desc: Tail Xray logs
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} logs -f xray
+
+  xray:genkeys:
+    desc: "Generate new Reality x25519 keypair + short_id (print, not saved)"
+    cmds:
+      - |
+        echo "--- Reality x25519 keys ---"
+        docker run --rm ghcr.io/xtls/xray-core:latest x25519
+        echo "--- short_id (8 bytes hex) ---"
+        openssl rand -hex 8
+
+  # ==================== DATABASE ====================
+
+  db:up:
+    desc: Start only PostgreSQL from the stack
+    deps: [env:generate]
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} up -d postgres
+
+  db:down:
+    desc: Stop PostgreSQL (and the whole stack)
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} down
+
+  db:psql:
+    desc: Open psql shell in the running postgres container
+    dotenv: ['{{.MASTER_ENV}}']
+    cmds:
+      - docker exec -it vpn-postgres psql -U ${POSTGRES_USER} -d ${POSTGRES_DB}
+
+  # ==================== MIGRATIONS ====================
+  # Uses golang-migrate via docker. Stack must be running (task db:up).
+
+  migrate:up:
+    desc: Apply all migrations (auth → subscription → vpn) using per-service schema_migrations tables
+    dotenv: ['{{.MASTER_ENV}}']
+    cmds:
+      - |
+        for svc in auth subscription vpn; do
+          docker run --rm \
+            --network vpn-stack_vpn \
+            -v "$PWD/{{.SERVICES_DIR}}/$svc-service/migrations":/m \
+            migrate/migrate:4 \
+            -path /m \
+            -database "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable&x-migrations-table=${svc}_schema_migrations" \
+            up || exit 1;
+        done
+
+  migrate:down:
+    desc: Roll back all migrations (vpn → subscription → auth)
+    dotenv: ['{{.MASTER_ENV}}']
+    cmds:
+      - |
+        for svc in vpn subscription auth; do
+          docker run --rm \
+            --network vpn-stack_vpn \
+            -v "$PWD/{{.SERVICES_DIR}}/$svc-service/migrations":/m \
+            migrate/migrate:4 \
+            -path /m \
+            -database "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable&x-migrations-table=${svc}_schema_migrations" \
+            down -all || exit 1;
+        done
+
+  # ==================== UTIL ====================
+
+  clean:
+    desc: Clean build artifacts (binaries + generated proto)
+    cmds:
+      - rm -rf {{.BIN_DIR}}/*
+      - rm -rf {{.PROTO_OUT_DIR}}/*
+
+  clean:env:
+    desc: Remove generated per-service .env files (keeps master .env and templates)
+    cmds:
+      - rm -f {{.ENV_DIR}}/auth.env {{.ENV_DIR}}/sub.env {{.ENV_DIR}}/vpn.env {{.ENV_DIR}}/gateway.env

@@ -1,0 +1,183 @@
+# ============================================================
+# VPN Stack — Local Development (all-in-one)
+# ============================================================
+# Читает мастер-env из deploy/env/.env (с префиксами AUTH_/SUB_/VPN_/GATEWAY_)
+# и мапит в env-секциях контейнеров на чистые переменные без префиксов,
+# которые ждут services/*/internal/config/config.go.
+#
+# Usage (из vpn_go/):
+#   task env:generate                       # 1 раз, создаёт deploy/env/.env
+#   task compose:up                         # поднимает стек
+#   task compose:logs                       # tail
+#   task compose:down
+# ============================================================
+
+name: vpn-stack
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    container_name: vpn-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      # Host port — overridable. В сети compose postgres всегда слушает 5432.
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - vpn_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [vpn]
+
+  migrate:
+    # One-shot migration runner. Exits 0 when all migrations are applied.
+    image: migrate/migrate:4
+    container_name: vpn-migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ../../services/auth-service/migrations:/migrations/auth
+      - ../../services/subscription-service/migrations:/migrations/subscription
+      - ../../services/vpn-service/migrations:/migrations/vpn
+    entrypoint: >
+      sh -c "
+      for m in auth subscription vpn; do
+        echo '>>> migrating' $$m;
+        migrate -path /migrations/$$m -database 'postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable&x-migrations-table='$$m'_schema_migrations' up || exit 1;
+      done;
+      echo 'All migrations applied.'
+      "
+    networks: [vpn]
+    restart: "no"
+
+  auth-service:
+    build:
+      context: ../..
+      dockerfile: services/auth-service/Dockerfile
+    container_name: vpn-auth
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      GRPC_HOST: ${AUTH_GRPC_HOST}
+      GRPC_PORT: ${AUTH_GRPC_PORT}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: ${POSTGRES_DB}
+      JWT_SECRET: ${AUTH_JWT_SECRET}
+      JWT_TTL_HOURS: ${AUTH_JWT_TTL_HOURS}
+      TELEGRAM_BOT_TOKEN: ${AUTH_TELEGRAM_BOT_TOKEN}
+      LOG_LEVEL: ${AUTH_LOG_LEVEL}
+    ports:
+      - "${AUTH_GRPC_PORT}:${AUTH_GRPC_PORT}"
+    networks: [vpn]
+
+  subscription-service:
+    build:
+      context: ../..
+      dockerfile: services/subscription-service/Dockerfile
+    container_name: vpn-subscription
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      GRPC_HOST: ${SUB_GRPC_HOST}
+      GRPC_PORT: ${SUB_GRPC_PORT}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: ${POSTGRES_DB}
+      LOG_LEVEL: ${SUB_LOG_LEVEL}
+    ports:
+      - "${SUB_GRPC_PORT}:${SUB_GRPC_PORT}"
+    networks: [vpn]
+
+  vpn-service:
+    build:
+      context: ../..
+      dockerfile: services/vpn-service/Dockerfile
+    container_name: vpn-core
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      xray:
+        condition: service_started
+    environment:
+      GRPC_HOST: ${VPN_GRPC_HOST}
+      GRPC_PORT: ${VPN_GRPC_PORT}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: ${POSTGRES_DB}
+      XRAY_API_HOST: ${VPN_XRAY_API_HOST}
+      XRAY_API_PORT: ${VPN_XRAY_API_PORT}
+      XRAY_INBOUND_TAG: ${VPN_XRAY_INBOUND_TAG}
+      XRAY_PUBLIC_HOST: ${VPN_XRAY_PUBLIC_HOST}
+      XRAY_VLESS_PORT: ${VPN_XRAY_VLESS_PORT}
+      XRAY_REALITY_PUBLIC_KEY: ${VPN_XRAY_REALITY_PUBLIC_KEY}
+      XRAY_REALITY_SHORT_ID: ${VPN_XRAY_REALITY_SHORT_ID}
+      XRAY_REALITY_SNI: ${VPN_XRAY_REALITY_SNI}
+      LOG_LEVEL: ${VPN_LOG_LEVEL}
+    ports:
+      - "${VPN_GRPC_PORT}:${VPN_GRPC_PORT}"
+    networks: [vpn]
+
+  xray:
+    # Official XTLS/Xray-core image. Entrypoint defaults to running with
+    # the mounted /etc/xray/config.json. Reality keys and shortId come
+    # from deploy/env/.env → deploy/compose/xray/config.json (generated
+    # by `task env:generate`).
+    image: ghcr.io/xtls/xray-core:latest
+    container_name: vpn-xray
+    command: ["-c", "/etc/xray/config.json"]
+    volumes:
+      - ./xray/config.json:/etc/xray/config.json:ro
+    ports:
+      # VLESS+Reality inbound. Один порт — и внутри контейнера и на хосте.
+      - "${VPN_XRAY_VLESS_PORT}:${VPN_XRAY_VLESS_PORT}"
+      # Xray management API (gRPC) — только для vpn-service внутри сети,
+      # publish на хост для дебага (grpcurl).
+      - "${VPN_XRAY_API_PORT}:${VPN_XRAY_API_PORT}"
+    restart: unless-stopped
+    networks: [vpn]
+
+  gateway:
+    build:
+      context: ../..
+      dockerfile: services/gateway/Dockerfile
+    container_name: vpn-gateway
+    depends_on:
+      - auth-service
+      - subscription-service
+      - vpn-service
+      - xray
+    environment:
+      HTTP_HOST: ${GATEWAY_HTTP_HOST}
+      HTTP_PORT: ${GATEWAY_HTTP_PORT}
+      AUTH_SERVICE_ADDR: ${GATEWAY_AUTH_SERVICE_ADDR}
+      SUBSCRIPTION_SERVICE_ADDR: ${GATEWAY_SUB_SERVICE_ADDR}
+      VPN_SERVICE_ADDR: ${GATEWAY_VPN_SERVICE_ADDR}
+      PAYMENT_SERVICE_ADDR: ${GATEWAY_PAYMENT_SERVICE_ADDR}
+      REFERRAL_SERVICE_ADDR: ${GATEWAY_REFERRAL_SERVICE_ADDR}
+      ADMIN_SERVICE_ADDR: ${GATEWAY_ADMIN_SERVICE_ADDR}
+      LOG_LEVEL: ${GATEWAY_LOG_LEVEL}
+    ports:
+      - "${GATEWAY_HTTP_PORT}:${GATEWAY_HTTP_PORT}"
+    networks: [vpn]
+
+volumes:
+  vpn_pg_data:
+
+networks:
+  vpn:
+    driver: bridge

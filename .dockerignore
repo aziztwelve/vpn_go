@@ -1,0 +1,13 @@
+bin/
+logs/
+.git/
+.github/
+docs/
+*.md
+README.md
+.env
+.env.*
+!.env.example
+.DS_Store
+coverage.out
+*.test

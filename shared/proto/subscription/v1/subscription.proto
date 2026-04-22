@@ -1,0 +1,130 @@
+syntax = "proto3";
+
+package subscription.v1;
+
+option go_package = "github.com/vpn/shared/pkg/proto/subscription/v1";
+
+service SubscriptionService {
+  // Получить список тарифных планов
+  rpc ListPlans(ListPlansRequest) returns (ListPlansResponse);
+  
+  // Получить цены на дополнительные устройства
+  rpc GetDevicePricing(GetDevicePricingRequest) returns (GetDevicePricingResponse);
+  
+  // Создать подписку
+  rpc CreateSubscription(CreateSubscriptionRequest) returns (CreateSubscriptionResponse);
+  
+  // Получить активную подписку пользователя
+  rpc GetActiveSubscription(GetActiveSubscriptionRequest) returns (GetActiveSubscriptionResponse);
+  
+  // Продлить подписку (добавить дни)
+  rpc ExtendSubscription(ExtendSubscriptionRequest) returns (ExtendSubscriptionResponse);
+  
+  // Отменить подписку
+  rpc CancelSubscription(CancelSubscriptionRequest) returns (CancelSubscriptionResponse);
+  
+  // Проверить активность подписки
+  rpc CheckSubscriptionActive(CheckSubscriptionActiveRequest) returns (CheckSubscriptionActiveResponse);
+  
+  // Получить историю подписок пользователя
+  rpc GetSubscriptionHistory(GetSubscriptionHistoryRequest) returns (GetSubscriptionHistoryResponse);
+}
+
+message ListPlansRequest {
+  bool active_only = 1;
+}
+
+message ListPlansResponse {
+  repeated SubscriptionPlan plans = 1;
+}
+
+message GetDevicePricingRequest {
+  int32 plan_id = 1;
+}
+
+message GetDevicePricingResponse {
+  repeated DevicePrice prices = 1;
+}
+
+message CreateSubscriptionRequest {
+  int64 user_id = 1;
+  int32 plan_id = 2;
+  int32 max_devices = 3;
+  string total_price = 4; // Decimal as string
+}
+
+message CreateSubscriptionResponse {
+  Subscription subscription = 1;
+}
+
+message GetActiveSubscriptionRequest {
+  int64 user_id = 1;
+}
+
+message GetActiveSubscriptionResponse {
+  Subscription subscription = 1;
+  bool has_active = 2;
+}
+
+message ExtendSubscriptionRequest {
+  int64 subscription_id = 1;
+  int32 days = 2;
+}
+
+message ExtendSubscriptionResponse {
+  Subscription subscription = 1;
+}
+
+message CancelSubscriptionRequest {
+  int64 subscription_id = 1;
+}
+
+message CancelSubscriptionResponse {
+  Subscription subscription = 1;
+}
+
+message CheckSubscriptionActiveRequest {
+  int64 user_id = 1;
+}
+
+message CheckSubscriptionActiveResponse {
+  bool is_active = 1;
+  int64 subscription_id = 2;
+  string expires_at = 3;
+  int32 max_devices = 4;
+}
+
+message GetSubscriptionHistoryRequest {
+  int64 user_id = 1;
+}
+
+message GetSubscriptionHistoryResponse {
+  repeated Subscription subscriptions = 1;
+}
+
+message SubscriptionPlan {
+  int32 id = 1;
+  string name = 2;
+  int32 duration_days = 3;
+  int32 max_devices = 4;
+  string base_price = 5; // Decimal as string
+  bool is_active = 6;
+}
+
+message DevicePrice {
+  int32 max_devices = 1;
+  string price = 2; // Decimal as string
+}
+
+message Subscription {
+  int64 id = 1;
+  int64 user_id = 2;
+  int32 plan_id = 3;
+  string plan_name = 4;
+  int32 max_devices = 5;
+  string total_price = 6; // Decimal as string
+  string started_at = 7;
+  string expires_at = 8;
+  string status = 9; // active, expired, cancelled
+  string created_at = 10;
+}
