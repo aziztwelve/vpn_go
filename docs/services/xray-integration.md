@@ -132,14 +132,19 @@ Telegram Mini App ─► POST /api/v1/payments/success  (на Этапе 5)
 БД тут вообще не участвует. Xray сам всё решает за микросекунды.
 ```
 
-### 3. Сбор статистики (Этап 3, пока TODO)
+### 3. Сбор статистики (✅ Этап 3, реализовано)
 ```
-Каждые 60 секунд, фоновая горутина в VPN Service:
-  for each active vpn_user:
-    stats = xray.GetUserStats(email, reset=false)
-    if stats.Uplink + stats.Downlink > previous:
-      UPDATE active_connections SET last_seen = NOW()
-      WHERE vpn_user_id = ... AND ...
+Каждые 60 секунд, горутина Heartbeat (service/heartbeat.go):
+  for each vpn_user:
+    stats = xray.GetUserStats(email, reset=false)     ─► Xray Stats API
+    total = stats.Uplink + stats.Downlink
+    if total > prevSeen[email]:                      (in-memory map)
+      UPDATE active_connections SET last_seen=NOW()
+      WHERE vpn_user_id = X
+    prevSeen[email] = total
+
+  — UPDATE бьётся сразу по ВСЕМ device_identifier юзера,
+    т.к. один UUID даёт один счётчик (см. docs/services/device-limit.md)
 ```
 
 ### 4. Смерть (подписка истекла / бан)
@@ -183,12 +188,11 @@ Xray рестартует (обновление, крэш) → теряет ВС
 - Оба источника заполняются из одного env (`VPN_XRAY_REALITY_*`) через `task env:generate` → drift невозможен
 
 **Что синхронизируется автоматически, что нет:**
-- ✅ `CreateVPNUser` — сразу в Xray
+- ✅ `CreateVPNUser` — сразу в Xray (Этап 2)
+- ✅ Трафик → `active_connections.last_seen` через Heartbeat каждые 60с (Этап 3)
+- ✅ Выдача VLESS-ссылки → UPSERT записи в `active_connections` + проверка `max_devices` (Этап 3)
 - ❌ Истечение подписки → физическое удаление из Xray — **TODO Этап 5**
 - ❌ Рестарт Xray → re-seed всех существующих юзеров — **TODO**
-- ❌ Трафик → `active_connections.last_seen` — **TODO Этап 3**
-
-Это известная задолженность, которая закрывается в следующих этапах.
 
 ---
 

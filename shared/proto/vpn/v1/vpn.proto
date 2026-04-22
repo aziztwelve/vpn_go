@@ -44,11 +44,21 @@ message GetVPNUserResponse {
 message GetVLESSLinkRequest {
   int64 user_id = 1;
   int32 server_id = 2;
+  // device_identifier — имя устройства ("iPhone", "PC-work"). Если передан,
+  // запись создаётся/обновляется в active_connections и применяется проверка
+  // max_devices подписки. Если пусто — просто возвращается ссылка без учёта
+  // слотов (служебный вызов / админские сценарии).
+  string device_identifier = 3;
 }
 
 message GetVLESSLinkResponse {
   string vless_link = 1;
   Server server = 2;
+  // Состояние слотов после выдачи ссылки (для UI — чтобы показать "2/2").
+  int32 current_devices = 3;
+  int32 max_devices = 4;
+  // ID записи в active_connections (если device_identifier был передан)
+  int64 connection_id = 5;
 }
 
 message ListServersRequest {

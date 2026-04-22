@@ -76,8 +76,10 @@ func (h *SubscriptionHandler) GetDevicePricing(w http.ResponseWriter, r *http.Re
 }
 
 func (h *SubscriptionHandler) GetActiveSubscription(w http.ResponseWriter, r *http.Request) {
-	// TODO: Get user ID from JWT token
-	userID := int64(1) // Mock for now
+	userID, ok := userIDFromRequest(w, r)
+	if !ok {
+		return
+	}
 
 	resp, err := h.subscriptionClient.GetActiveSubscription(r.Context(), userID)
 	if err != nil {
@@ -124,8 +126,10 @@ func (h *SubscriptionHandler) CreateSubscription(w http.ResponseWriter, r *http.
 		return
 	}
 
-	// TODO: Get user ID from JWT token
-	userID := int64(1) // Mock for now
+	userID, ok := userIDFromRequest(w, r)
+	if !ok {
+		return
+	}
 
 	resp, err := h.subscriptionClient.CreateSubscription(r.Context(), userID, req.PlanID, req.MaxDevices, req.TotalPrice)
 	if err != nil {
@@ -153,8 +157,10 @@ func (h *SubscriptionHandler) CreateSubscription(w http.ResponseWriter, r *http.
 }
 
 func (h *SubscriptionHandler) GetSubscriptionHistory(w http.ResponseWriter, r *http.Request) {
-	// TODO: Get user ID from JWT token
-	userID := int64(1) // Mock for now
+	userID, ok := userIDFromRequest(w, r)
+	if !ok {
+		return
+	}
 
 	resp, err := h.subscriptionClient.GetSubscriptionHistory(r.Context(), userID)
 	if err != nil {

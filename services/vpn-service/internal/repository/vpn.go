@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/vpn/vpn-service/internal/model"
@@ -132,6 +133,94 @@ func (r *VPNRepository) GetVPNUserByUserID(ctx context.Context, userID int64) (*
 	}
 
 	return vpnUser, nil
+}
+
+// ListAllVPNUsers возвращает id+email всех юзеров — используется heartbeat-ом
+// для опроса Xray Stats API.
+func (r *VPNRepository) ListAllVPNUsers(ctx context.Context) ([]*model.VPNUser, error) {
+	query := `SELECT id, user_id, subscription_id, uuid, email, flow, created_at FROM vpn_users`
+	rows, err := r.db.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("list vpn users: %w", err)
+	}
+	defer rows.Close()
+
+	var users []*model.VPNUser
+	for rows.Next() {
+		u := &model.VPNUser{}
+		if err := rows.Scan(&u.ID, &u.UserID, &u.SubscriptionID, &u.UUID, &u.Email, &u.Flow, &u.CreatedAt); err != nil {
+			return nil, err
+		}
+		users = append(users, u)
+	}
+	return users, nil
+}
+
+// GetSubscriptionMaxDevices возвращает max_devices активной подписки vpn-юзера.
+// Кросс-сервисный JOIN — читаем из таблицы subscription-service (та же БД,
+// public schema). Если подписка не активна — возвращаем (0, ErrNoActiveSub).
+func (r *VPNRepository) GetSubscriptionMaxDevices(ctx context.Context, vpnUserID int64) (int32, error) {
+	query := `
+		SELECT s.max_devices
+		FROM vpn_users vu
+		JOIN subscriptions s ON s.id = vu.subscription_id
+		WHERE vu.id = $1 AND s.status = 'active' AND s.expires_at > NOW()
+	`
+	var maxDevices int32
+	err := r.db.QueryRow(ctx, query, vpnUserID).Scan(&maxDevices)
+	if err != nil {
+		return 0, fmt.Errorf("get max_devices for vpn_user %d: %w", vpnUserID, err)
+	}
+	return maxDevices, nil
+}
+
+// Active Connections
+
+// CountActiveDevices — сколько устройств юзера с last_seen ещё свежий.
+// window — насколько давно должно быть last_seen чтобы считать устройство живым.
+func (r *VPNRepository) CountActiveDevices(ctx context.Context, vpnUserID int64, window time.Duration) (int32, error) {
+	query := `
+		SELECT COUNT(*) FROM active_connections
+		WHERE vpn_user_id = $1 AND last_seen > NOW() - ($2::text)::interval
+	`
+	var count int32
+	// передаём window как текст '300 seconds' — pgx понимает interval из строки
+	interval := fmt.Sprintf("%d seconds", int(window.Seconds()))
+	err := r.db.QueryRow(ctx, query, vpnUserID, interval).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count active devices: %w", err)
+	}
+	return count, nil
+}
+
+// UpsertActiveConnection — создать или обновить запись about устройстве.
+// Уникальный ключ: (vpn_user_id, device_identifier). При обновлении
+// бьётся last_seen=NOW(), server_id меняется на актуальный.
+func (r *VPNRepository) UpsertActiveConnection(ctx context.Context, vpnUserID int64, serverID int32, deviceIdentifier string) (*model.ActiveConnection, error) {
+	query := `
+		INSERT INTO active_connections (vpn_user_id, server_id, device_identifier, connected_at, last_seen)
+		VALUES ($1, $2, $3, NOW(), NOW())
+		ON CONFLICT (vpn_user_id, device_identifier) DO UPDATE SET
+			server_id = EXCLUDED.server_id,
+			last_seen = NOW()
+		RETURNING id, vpn_user_id, server_id, device_identifier, connected_at, last_seen
+	`
+	conn := &model.ActiveConnection{}
+	err := r.db.QueryRow(ctx, query, vpnUserID, serverID, deviceIdentifier).Scan(
+		&conn.ID, &conn.VPNUserID, &conn.ServerID, &conn.DeviceIdentifier, &conn.ConnectedAt, &conn.LastSeen,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("upsert active connection: %w", err)
+	}
+	return conn, nil
+}
+
+// UpdateLastSeenByVPNUser — обновляет last_seen=NOW() для ВСЕХ устройств
+// юзера. Вызывается heartbeat-ом когда Xray показал рост трафика.
+// См. ограничение модели в docs/services/device-limit.md.
+func (r *VPNRepository) UpdateLastSeenByVPNUser(ctx context.Context, vpnUserID int64) error {
+	_, err := r.db.Exec(ctx, `UPDATE active_connections SET last_seen = NOW() WHERE vpn_user_id = $1`, vpnUserID)
+	return err
 }
 
 // Active Connections

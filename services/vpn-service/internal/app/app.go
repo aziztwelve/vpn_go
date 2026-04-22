@@ -24,6 +24,7 @@ type App struct {
 	logger     *zap.Logger
 	db         *pgxpool.Pool
 	xray       *xray.Client
+	heartbeat  *service.Heartbeat
 	grpcServer *grpc.Server
 	closer     *closer.Closer
 }
@@ -146,6 +147,7 @@ func (a *App) initGRPC() error {
 	repo := repository.NewVPNRepository(a.db)
 	svc := service.NewVPNService(repo, a.xray, a.logger)
 	vpnAPI := api.NewVPNAPI(svc, a.logger)
+	a.heartbeat = service.NewHeartbeat(repo, a.xray, a.logger)
 
 	a.grpcServer = grpc.NewServer()
 	pb.RegisterVPNServiceServer(a.grpcServer, vpnAPI)
@@ -173,6 +175,15 @@ func (a *App) Start() error {
 			a.logger.Fatal("gRPC server error", zap.Error(err))
 		}
 	}()
+
+	// Heartbeat: опрос Xray Stats API → обновление last_seen.
+	// Ctx отменяется при shutdown → горутина сама корректно завершится.
+	hbCtx, hbCancel := context.WithCancel(context.Background())
+	a.closer.Add(func(ctx context.Context) error {
+		hbCancel()
+		return nil
+	})
+	go a.heartbeat.Run(hbCtx)
 
 	return nil
 }

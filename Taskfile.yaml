@@ -151,16 +151,38 @@ tasks:
 
   # ==================== PROTO ====================
 
+  proto:install-plugins:
+    desc: Install protoc-gen-go + protoc-gen-go-grpc into ./bin
+    cmds:
+      - |
+        mkdir -p {{.BIN_DIR}}
+        if [ ! -x {{.BIN_DIR}}/protoc-gen-go ]; then
+          echo "📦 Installing protoc-gen-go..."
+          GOBIN=$(pwd)/{{.BIN_DIR}} go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+        fi
+        if [ ! -x {{.BIN_DIR}}/protoc-gen-go-grpc ]; then
+          echo "📦 Installing protoc-gen-go-grpc..."
+          GOBIN=$(pwd)/{{.BIN_DIR}} go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+        fi
+    status:
+      - test -x {{.BIN_DIR}}/protoc-gen-go
+      - test -x {{.BIN_DIR}}/protoc-gen-go-grpc
+
   proto:gen:
     desc: Generate Go code from proto files
+    deps: [proto:install-plugins]
     cmds:
       - mkdir -p {{.PROTO_OUT_DIR}}
       - |
-        for proto in {{.PROTO_DIR}}/**/*.proto; do
-          protoc --go_out={{.PROTO_OUT_DIR}} --go_opt=paths=source_relative \
-                 --go-grpc_out={{.PROTO_OUT_DIR}} --go-grpc_opt=paths=source_relative \
-                 -I={{.PROTO_DIR}} $proto
-        done
+        bash -c '
+          export PATH="$PWD/{{.BIN_DIR}}:$PATH"
+          while IFS= read -r -d "" proto; do
+            echo "  🔧 $proto"
+            protoc --go_out={{.PROTO_OUT_DIR}} --go_opt=paths=source_relative \
+                   --go-grpc_out={{.PROTO_OUT_DIR}} --go-grpc_opt=paths=source_relative \
+                   -I={{.PROTO_DIR}} "$proto"
+          done < <(find {{.PROTO_DIR}} -type f -name "*.proto" -print0)
+        '
 
   # ==================== COMPOSE ====================
 

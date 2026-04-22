@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 
 	"github.com/vpn/vpn-service/internal/service"
 	pb "github.com/vpn/shared/pkg/proto/vpn/v1"
@@ -76,28 +77,37 @@ func (a *VPNAPI) GetVLESSLink(ctx context.Context, req *pb.GetVLESSLinkRequest) 
 		return nil, status.Error(codes.InvalidArgument, "user_id and server_id are required")
 	}
 
-	vlessLink, server, err := a.service.GenerateVLESSLink(ctx, req.UserId, req.ServerId)
+	res, err := a.service.GenerateVLESSLink(ctx, req.UserId, req.ServerId, req.DeviceIdentifier)
+	if errors.Is(err, service.ErrDeviceLimitExceeded) {
+		return nil, status.Errorf(codes.ResourceExhausted,
+			"device limit exceeded: %d/%d devices active",
+			res.CurrentDevices, res.MaxDevices,
+		)
+	}
 	if err != nil {
 		a.logger.Error("Failed to generate VLESS link", zap.Error(err))
 		return nil, status.Error(codes.Internal, "failed to generate VLESS link")
 	}
 
 	return &pb.GetVLESSLinkResponse{
-		VlessLink: vlessLink,
+		VlessLink: res.Link,
 		Server: &pb.Server{
-			Id:          server.ID,
-			Name:        server.Name,
-			Location:    server.Location,
-			CountryCode: server.CountryCode,
-			Host:        server.Host,
-			Port:        server.Port,
-			PublicKey:   server.PublicKey,
-			ShortId:     server.ShortID,
-			Dest:        server.Dest,
-			ServerNames: server.ServerNames,
-			IsActive:    server.IsActive,
-			LoadPercent: server.LoadPercent,
+			Id:          res.Server.ID,
+			Name:        res.Server.Name,
+			Location:    res.Server.Location,
+			CountryCode: res.Server.CountryCode,
+			Host:        res.Server.Host,
+			Port:        res.Server.Port,
+			PublicKey:   res.Server.PublicKey,
+			ShortId:     res.Server.ShortID,
+			Dest:        res.Server.Dest,
+			ServerNames: res.Server.ServerNames,
+			IsActive:    res.Server.IsActive,
+			LoadPercent: res.Server.LoadPercent,
 		},
+		CurrentDevices: res.CurrentDevices,
+		MaxDevices:     res.MaxDevices,
+		ConnectionId:   res.ConnectionID,
 	}, nil
 }
 

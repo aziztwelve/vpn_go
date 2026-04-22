@@ -46,10 +46,11 @@ func (c *VPNClient) GetVPNUser(ctx context.Context, userID int64) (*pb.GetVPNUse
 	})
 }
 
-func (c *VPNClient) GetVLESSLink(ctx context.Context, userID int64, serverID int32) (*pb.GetVLESSLinkResponse, error) {
+func (c *VPNClient) GetVLESSLink(ctx context.Context, userID int64, serverID int32, deviceID string) (*pb.GetVLESSLinkResponse, error) {
 	return c.client.GetVLESSLink(ctx, &pb.GetVLESSLinkRequest{
-		UserId:   userID,
-		ServerId: serverID,
+		UserId:           userID,
+		ServerId:         serverID,
+		DeviceIdentifier: deviceID,
 	})
 }
 
@@ -62,5 +63,11 @@ func (c *VPNClient) ListServers(ctx context.Context, activeOnly bool) (*pb.ListS
 func (c *VPNClient) GetActiveConnections(ctx context.Context, userID int64) (*pb.GetActiveConnectionsResponse, error) {
 	return c.client.GetActiveConnections(ctx, &pb.GetActiveConnectionsRequest{
 		UserId: userID,
+	})
+}
+
+func (c *VPNClient) DisconnectDevice(ctx context.Context, connectionID int64) (*pb.DisconnectDeviceResponse, error) {
+	return c.client.DisconnectDevice(ctx, &pb.DisconnectDeviceRequest{
+		ConnectionId: connectionID,
 	})
 }

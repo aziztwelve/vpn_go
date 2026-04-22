@@ -13,6 +13,7 @@ import (
 	"github.com/vpn/gateway/internal/config"
 	"github.com/vpn/gateway/internal/handler"
 	"github.com/vpn/platform/pkg/closer"
+	authmw "github.com/vpn/platform/pkg/middleware"
 	"go.uber.org/zap"
 )
 
@@ -30,6 +31,9 @@ func New(logger *zap.Logger) (*App, error) {
 	cfg, err := config.New()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load config: %w", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 
 	app := &App{
@@ -115,6 +119,9 @@ func (a *App) Start() error {
 	subscriptionHandler := handler.NewSubscriptionHandler(a.subscriptionClient, a.logger)
 	vpnHandler := handler.NewVPNHandler(a.vpnClient, a.logger)
 
+	// JWT middleware для защищённых ручек. Секрет — общий с Auth Service.
+	jwtMiddleware := authmw.JWTMiddleware(a.config.JWT.Secret)
+
 	// API routes
 	router.Route("/api/v1", func(r chi.Router) {
 		r.Get("/", func(w http.ResponseWriter, r *http.Request) {
@@ -123,21 +130,31 @@ func (a *App) Start() error {
 			w.Write([]byte(`{"status":"ok","service":"vpn-gateway"}`))
 		})
 
-		// Auth routes
+		// ───── Публичные ручки (без JWT) ─────────────────────────────
+		// Логин через Telegram initData — откуда ещё брать токен.
 		r.Post("/auth/validate", authHandler.ValidateTelegramUser)
-		r.Get("/auth/users/{userId}", authHandler.GetUser)
-
-		// Subscription routes
+		// Прайс-лист доступен и до логина (приветственный экран Mini App).
 		r.Get("/subscriptions/plans", subscriptionHandler.ListPlans)
 		r.Get("/subscriptions/plans/{planId}/pricing", subscriptionHandler.GetDevicePricing)
-		r.Get("/subscriptions/active", subscriptionHandler.GetActiveSubscription)
-		r.Post("/subscriptions", subscriptionHandler.CreateSubscription)
-		r.Get("/subscriptions/history", subscriptionHandler.GetSubscriptionHistory)
 
-		// VPN routes
-		r.Get("/vpn/servers", vpnHandler.ListServers)
-		r.Get("/vpn/servers/{serverId}/link", vpnHandler.GetVLESSLink)
-		r.Get("/vpn/connections", vpnHandler.GetActiveConnections)
+		// ───── Защищённые ручки (Authorization: Bearer <JWT>) ─────────
+		r.Group(func(r chi.Router) {
+			r.Use(jwtMiddleware)
+
+			// Auth
+			r.Get("/auth/users/{userId}", authHandler.GetUser)
+
+			// Subscriptions
+			r.Get("/subscriptions/active", subscriptionHandler.GetActiveSubscription)
+			r.Post("/subscriptions", subscriptionHandler.CreateSubscription)
+			r.Get("/subscriptions/history", subscriptionHandler.GetSubscriptionHistory)
+
+			// VPN
+			r.Get("/vpn/servers", vpnHandler.ListServers)
+			r.Get("/vpn/servers/{serverId}/link", vpnHandler.GetVLESSLink)
+			r.Get("/vpn/connections", vpnHandler.GetActiveConnections)
+			r.Delete("/vpn/devices/{connectionId}", vpnHandler.DisconnectDevice)
+		})
 	})
 
 	// HTTP Server

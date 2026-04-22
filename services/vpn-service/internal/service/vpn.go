@@ -2,9 +2,11 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/vpn/platform/pkg/xray"
@@ -12,6 +14,15 @@ import (
 	"github.com/vpn/vpn-service/internal/repository"
 	"go.uber.org/zap"
 )
+
+// DeviceActivityWindow — сколько времени без роста трафика устройство
+// считается "живым" слотом. По истечении окна slot освобождается, юзер
+// может подключить другое устройство.
+const DeviceActivityWindow = 5 * time.Minute
+
+// ErrDeviceLimitExceeded — попытка получить VLESS-ссылку для нового устройства
+// когда COUNT активных connection'ов уже равен max_devices подписки.
+var ErrDeviceLimitExceeded = errors.New("device limit exceeded")
 
 type VPNService struct {
 	repo   *repository.VPNRepository
@@ -85,20 +96,91 @@ func (s *VPNService) GetVPNUser(ctx context.Context, userID int64) (*model.VPNUs
 	return s.repo.GetVPNUserByUserID(ctx, userID)
 }
 
-func (s *VPNService) GenerateVLESSLink(ctx context.Context, userID int64, serverID int32) (string, *model.VPNServer, error) {
+// VLESSLinkResult — полный результат выдачи ссылки с состоянием слотов.
+type VLESSLinkResult struct {
+	Link           string
+	Server         *model.VPNServer
+	ConnectionID   int64 // 0 если deviceIdentifier пустой
+	CurrentDevices int32
+	MaxDevices     int32
+}
+
+// GenerateVLESSLink возвращает ссылку подключения к серверу serverID.
+//
+// Если deviceIdentifier != "" — проверяется лимит max_devices подписки:
+//   - COUNT активных устройств (last_seen свежее DeviceActivityWindow) < max_devices
+//   - Запись в active_connections создаётся/обновляется (UPSERT)
+//   - Возвращается ErrDeviceLimitExceeded если лимит достигнут и устройство новое
+//
+// Если deviceIdentifier == "" — ссылка возвращается без проверок (admin / debug).
+func (s *VPNService) GenerateVLESSLink(ctx context.Context, userID int64, serverID int32, deviceIdentifier string) (*VLESSLinkResult, error) {
 	vpnUser, err := s.repo.GetVPNUserByUserID(ctx, userID)
 	if err != nil {
-		return "", nil, fmt.Errorf("vpn user not found: %w", err)
+		return nil, fmt.Errorf("vpn user not found: %w", err)
 	}
 
 	server, err := s.repo.GetServer(ctx, serverID)
 	if err != nil {
-		return "", nil, fmt.Errorf("server not found: %w", err)
+		return nil, fmt.Errorf("server not found: %w", err)
 	}
 
-	// Format: vless://UUID@HOST:PORT?params#NAME
-	vlessURL := fmt.Sprintf("vless://%s@%s:%d", vpnUser.UUID, server.Host, server.Port)
+	result := &VLESSLinkResult{Server: server}
 
+	if deviceIdentifier != "" {
+		maxDevices, err := s.repo.GetSubscriptionMaxDevices(ctx, vpnUser.ID)
+		if err != nil {
+			return nil, fmt.Errorf("check subscription: %w", err)
+		}
+		result.MaxDevices = maxDevices
+
+		// Проверка лимита: существует ли уже connection с этим device_identifier?
+		// Если да — это продление (update), лимит не увеличивается.
+		// Если нет — это новое устройство, считаем слот.
+		existing, err := s.repo.GetActiveConnections(ctx, vpnUser.ID)
+		if err != nil {
+			return nil, fmt.Errorf("get existing connections: %w", err)
+		}
+		isNewDevice := true
+		for _, c := range existing {
+			if c.DeviceIdentifier == deviceIdentifier {
+				isNewDevice = false
+				break
+			}
+		}
+
+		if isNewDevice {
+			activeCount, err := s.repo.CountActiveDevices(ctx, vpnUser.ID, DeviceActivityWindow)
+			if err != nil {
+				return nil, fmt.Errorf("count active devices: %w", err)
+			}
+			if activeCount >= maxDevices {
+				s.logger.Info("device limit exceeded",
+					zap.Int64("user_id", userID),
+					zap.String("device", deviceIdentifier),
+					zap.Int32("active", activeCount),
+					zap.Int32("max", maxDevices),
+				)
+				result.CurrentDevices = activeCount
+				return result, ErrDeviceLimitExceeded
+			}
+		}
+
+		// Upsert запись устройства — обновит last_seen даже если было старое.
+		conn, err := s.repo.UpsertActiveConnection(ctx, vpnUser.ID, serverID, deviceIdentifier)
+		if err != nil {
+			return nil, fmt.Errorf("upsert active connection: %w", err)
+		}
+		result.ConnectionID = conn.ID
+
+		// Пересчитать после upsert'а (для ответа — "2/2")
+		result.CurrentDevices, err = s.repo.CountActiveDevices(ctx, vpnUser.ID, DeviceActivityWindow)
+		if err != nil {
+			return nil, fmt.Errorf("count after upsert: %w", err)
+		}
+	}
+
+	// Генерация VLESS-ссылки: vless://UUID@HOST:PORT?params#NAME
+	vlessURL := fmt.Sprintf("vless://%s@%s:%d", vpnUser.UUID, server.Host, server.Port)
 	params := url.Values{}
 	params.Add("encryption", "none")
 	params.Add("flow", vpnUser.Flow)
@@ -109,9 +191,9 @@ func (s *VPNService) GenerateVLESSLink(ctx context.Context, userID int64, server
 	params.Add("sid", server.ShortID)
 	params.Add("type", "tcp")
 	params.Add("headerType", "none")
+	result.Link = fmt.Sprintf("%s?%s#%s", vlessURL, params.Encode(), url.QueryEscape(server.Name))
 
-	vlessLink := fmt.Sprintf("%s?%s#%s", vlessURL, params.Encode(), url.QueryEscape(server.Name))
-	return vlessLink, server, nil
+	return result, nil
 }
 
 func (s *VPNService) ListServers(ctx context.Context, activeOnly bool) ([]*model.VPNServer, error) {

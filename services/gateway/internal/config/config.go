@@ -9,7 +9,13 @@ import (
 type Config struct {
 	HTTP     HTTPConfig
 	Services ServicesConfig
+	JWT      JWTConfig
 	Log      LogConfig
+}
+
+// JWTConfig — секрет общий с Auth Service (тот же HMAC-ключ).
+type JWTConfig struct {
+	Secret string
 }
 
 type HTTPConfig struct {
@@ -43,10 +49,21 @@ func New() (*Config, error) {
 			SubscriptionAddr: getEnv("SUBSCRIPTION_SERVICE_ADDR", "localhost:50061"),
 			VPNAddr:          getEnv("VPN_SERVICE_ADDR", "localhost:50062"),
 		},
+		JWT: JWTConfig{
+			Secret: getEnv("JWT_SECRET", ""),
+		},
 		Log: LogConfig{
 			Level: getEnv("LOG_LEVEL", "info"),
 		},
 	}, nil
+}
+
+// Validate проверяет обязательные поля.
+func (c *Config) Validate() error {
+	if c.JWT.Secret == "" {
+		return fmt.Errorf("JWT_SECRET is required (must match auth-service)")
+	}
+	return nil
 }
 
 func getEnv(key, defaultValue string) string {

@@ -197,150 +197,556 @@ Taskfile.yaml                                                 ← + xray:{up,res
 
 ---
 
-### Этап 3 — Device Limit (0.5 дня)
-- [ ] 🔵 **[СТОП, ПРОДОЛЖИТЬ ОТСЮДА]** В `active_connections` использовать `last_seen` как heartbeat
-- [ ] Фоновая задача (каждые 60с): опрос Xray Stats API → обновление `last_seen` для активных UUID-ов
-- [ ] В момент `GetVLESSLink`: проверка `COUNT(active_connections WHERE last_seen > NOW() - 5min) < max_devices`
-- [ ] Если превышен — вернуть ошибку "device limit exceeded"
-- [ ] Метод `DisconnectDevice` для ручной очистки (юзер в UI нажал "отключить")
+### Этап 3 — Device Limit (0.5 дня) ✅ ЗАВЕРШЁН
+- [x] ✅ `active_connections.last_seen` используется как heartbeat-время последней активности устройства
+- [x] ✅ Фоновая горутина `service.Heartbeat` (в `services/vpn-service/internal/service/heartbeat.go`): каждые 60с опрашивает `xray.GetUserStats(email, reset=false)` для всех vpn_users, сравнивает с предыдущим значением суммы uplink+downlink, и если трафик вырос — `UPDATE active_connections SET last_seen=NOW() WHERE vpn_user_id=X`. Запускается в `app.Start()`, корректно останавливается при shutdown через `closer`.
+- [x] ✅ При выдаче VLESS-ссылки (`GenerateVLESSLink(userID, serverID, deviceIdentifier)`):
+  - JOIN c `subscriptions` → max_devices активной подписки
+  - если устройство НОВОЕ (нет такого device_identifier в active_connections) → `COUNT(WHERE last_seen > NOW() - 5min)` должен быть < max_devices
+  - если ИЗВЕСТНОЕ → slot не увеличивается, просто `UPSERT last_seen=NOW()`
+  - окно `DeviceActivityWindow = 5 * time.Minute`
+- [x] ✅ Если лимит превышен — `service.ErrDeviceLimitExceeded` → gRPC `codes.ResourceExhausted` → Gateway → **HTTP 429** `{"error":"device_limit_exceeded","message":"device limit exceeded: 2/2 devices active"}`
+- [x] ✅ Ручное отключение устройства: `DELETE /api/v1/vpn/devices/:connectionId` → gRPC `DisconnectDevice` → `DELETE FROM active_connections WHERE id = ...` (slot освобождается мгновенно)
+- [x] ✅ Proto обновлён: `GetVLESSLinkRequest.device_identifier`, `GetVLESSLinkResponse.current_devices/max_devices/connection_id`. Регенерирован через `task proto:gen` (плагины `protoc-gen-go` + `protoc-gen-go-grpc` ставятся в `./bin` автоматически).
+- [x] ✅ Миграция `active_connections` не понадобилась — UNIQUE `(vpn_user_id, device_identifier)` уже был в миграции 001, `ON CONFLICT` в `UpsertActiveConnection` работает.
+
+**e2e подтверждён (всё в одной сессии):**
+
+```bash
+# 1. seed: user_id=1, подписка с max_devices=2
+INSERT users, subscriptions → id=1
+
+# 2. CreateVPNUser → UUID=c8b191e9-…, добавлен в Xray
+
+# 3. Сценарий лимита:
+curl /api/v1/vpn/servers/5/link?user_id=1&device_id=iPhone   # 200, current=1/max=2
+curl /api/v1/vpn/servers/5/link?user_id=1&device_id=PC       # 200, current=2/max=2
+curl /api/v1/vpn/servers/5/link?user_id=1&device_id=Tablet   # 429 "device_limit_exceeded"
+curl /api/v1/vpn/servers/5/link?user_id=1&device_id=iPhone   # 200 (повтор известного → не слот)
+curl -X DELETE /api/v1/vpn/devices/2                         # удалить PC
+curl /api/v1/vpn/servers/5/link?user_id=1&device_id=Tablet   # 200, current=2/max=2
+
+# 4. Реальный Heartbeat:
+# (a) поднять xray-client с UUID, прогнать curl --socks5 … ipinfo.io  → ответ пришёл
+# (b) подождать 60с
+# (c) логи vpn-core: {"msg":"heartbeat tick","users_checked":1,"refreshed":1}
+# (d) active_connections: last_seen обновился с 09:14:03 → 09:17:07 ✓
+```
+
+**Что создано/изменено:**
+```
+shared/proto/vpn/v1/vpn.proto                                  ← +device_identifier, +current/max_devices
+shared/pkg/proto/vpn/v1/vpn.pb.go                              ← регенерирован
+
+services/vpn-service/
+├── internal/repository/vpn.go                                 ← +CountActiveDevices, UpsertActiveConnection,
+│                                                                 UpdateLastSeenByVPNUser, GetSubscriptionMaxDevices,
+│                                                                 ListAllVPNUsers
+├── internal/service/vpn.go                                    ← GenerateVLESSLink: +deviceIdentifier,
+│                                                                 возвращает VLESSLinkResult{Link, Server,
+│                                                                 ConnectionID, CurrentDevices, MaxDevices}
+├── internal/service/heartbeat.go                              ← NEW (Heartbeat{prevSeen}, Run(ctx), tick)
+├── internal/api/vpn.go                                        ← GetVLESSLink ловит ErrDeviceLimitExceeded
+│                                                                 → codes.ResourceExhausted
+└── internal/app/app.go                                        ← +service.Heartbeat, go a.heartbeat.Run(hbCtx)
+
+services/gateway/
+├── internal/client/vpn.go                                     ← GetVLESSLink(+deviceID), +DisconnectDevice
+├── internal/handler/vpn.go                                    ← device_id/user_id query-params,
+│                                                                 429 на ResourceExhausted,
+│                                                                 +DisconnectDevice handler
+└── internal/app/app.go                                        ← +DELETE /api/v1/vpn/devices/{connectionId}
+
+Taskfile.yaml                                                  ← +proto:install-plugins, fix proto:gen (find -print0)
+bin/protoc-gen-go, bin/protoc-gen-go-grpc                      ← gitignored, ставятся task'ом
+
+docs/services/device-limit.md                                  ← NEW (диаграммы + сценарии + ограничения модели)
+docs/services/README.md                                        ← + ссылка на device-limit.md
+```
+
+**Шпаргалка — новые API:**
+- `GET /api/v1/vpn/servers/:serverId/link?device_id=iPhone&user_id=1`
+  - 200 → `{"vless_link":"…","current_devices":1,"max_devices":2,"connection_id":1,"server":{…}}`
+  - 429 → `{"error":"device_limit_exceeded","message":"device limit exceeded: 2/2 devices active"}`
+- `DELETE /api/v1/vpn/devices/:connectionId`
+  - 200 → `{"success":true,"connection_id":N}`
+
+**Что осознанно НЕ сделано (оставлено на будущее):**
+- UUID per device — пока один UUID на юзера, поэтому heartbeat обновляет last_seen для **всех** устройств юзера одновременно (ограничение модели, описано в `docs/services/device-limit.md`). Для hard-limit нужно переделать модель — не в MVP.
+- Автоматическое удаление VLESS-юзера из Xray при окончании подписки (`xray.RemoveUser`) — закроется на Этапе 5 (Payment) вместе с cron-задачей проверки истёкших подписок.
+- Re-seed юзеров в Xray после рестарта контейнера vpn-xray — TODO, пока не критично (рестартов нет).
 
 ---
 
-### Этап 4 — Auth Middleware в Gateway (0.5 дня)
-- [ ] Добавить JWT middleware `platform/pkg/grpc/jwt_middleware.go`
-- [ ] В Gateway все `/api/v1/*` (кроме `/auth/validate`, `/health`, `/subscriptions/plans`) → требуют JWT
-- [ ] JWT приходит в `Authorization: Bearer <token>`
-- [ ] В контекст запроса кладётся `userId` — хендлеры берут оттуда, не из payload
-- [ ] Auth Service выдаёт JWT в ответ `ValidateTelegramUser`
+### Этап 4 — Auth Middleware в Gateway (0.5 дня) ✅ ЗАВЕРШЁН
+- [x] ✅ `platform/pkg/middleware/jwt.go` — `JWTMiddleware(secret)` (chi-совместимая): парсит `Authorization: Bearer <jwt>`, проверяет HS256-подпись + `exp`, кладёт `userID`/`role` в context. Ошибки различаются: `missing_token` / `invalid_scheme` / `invalid_signature` / `token_expired` → 401 JSON `{error, message}`. Хелперы `UserIDFromContext(ctx)`, `RoleFromContext(ctx)`.
+- [x] ✅ В Gateway роуты разделены на два слоя: **публичные** (`/health`, `POST /auth/validate`, `GET /subscriptions/plans`, `GET /subscriptions/plans/:id/pricing`) и **защищённые** (всё остальное через `r.Group(func(r) { r.Use(jwtMw); ... })`).
+- [x] ✅ JWT приходит в `Authorization: Bearer <token>`, парсится middleware'ом.
+- [x] ✅ В `context.Context` кладутся `userID` + `role`. Все handler'ы теперь используют `userIDFromRequest(w, r)` (helper в `handler/context.go`). Убраны все `userID := int64(1)` и query-параметр `?user_id=` из защищённых ручек.
+- [x] ✅ Auth Service уже умел `GenerateJWT(userID, role, TTL)` и возвращал `jwt_token` в `ValidateTelegramUser` — дополнительных изменений не потребовалось.
+- [x] ✅ `JWT_SECRET` — общий между Auth Service и Gateway, в env мастер `AUTH_JWT_SECRET` → `gateway.env.template` мапит на `JWT_SECRET=${AUTH_JWT_SECRET}` → `docker-compose.yml` прокидывает в оба контейнера. Gateway конфиг валидирует наличие секрета при старте.
+
+**e2e — 6 сценариев безопасности пройдено:**
+
+```bash
+# Публичные (без токена)
+curl /health                              → 200
+curl /api/v1/subscriptions/plans          → 200
+
+# Защищённые без токена
+curl /api/v1/vpn/servers/5/link?device_id=iPhone
+    → 401 {"error":"missing_token","message":"Authorization header required"}
+
+# Защищённые с ФЕЙКОВОЙ подписью
+curl -H "Authorization: Bearer eyJ...FAKE..."  /api/v1/vpn/servers/5/link
+    → 401 {"error":"invalid_signature","message":"invalid token: ..."}
+
+# С ИСТЁКШИМ токеном (exp < now)
+curl -H "Authorization: Bearer <expired>" /api/v1/subscriptions/active
+    → 401 {"error":"token_expired","message":"JWT token has expired"}
+
+# С валидным токеном
+curl -H "Authorization: Bearer <valid>" /api/v1/vpn/servers/5/link?device_id=iPhone
+    → 200, user_id взят из токена (1), connection_id=1
+
+# ⚠️ Попытка подмены user_id через query
+curl -H "Authorization: Bearer <user_id=1>" \
+     /api/v1/vpn/servers/5/link?device_id=iPhone&user_id=99
+    → 200, но в БД active_connections.vpn_user_id = 1 (НЕ 99)
+    — query user_id ПРОИГНОРИРОВАН, источник userID только токен ✓
+```
+
+**Что создано/изменено:**
+```
+platform/
+├── go.mod                                           ← +github.com/golang-jwt/jwt/v5 v5.2.1
+└── pkg/middleware/jwt.go                            ← NEW (JWTMiddleware + UserIDFromContext + RoleFromContext)
+
+services/gateway/
+├── internal/config/config.go                        ← +JWTConfig{Secret}, +Validate()
+├── internal/app/app.go                              ← +authmw импорт, +cfg.Validate() в New(),
+│                                                       разделение роутов на публичные vs r.Group+jwtMw
+├── internal/handler/context.go                      ← NEW (userIDFromRequest helper)
+├── internal/handler/vpn.go                          ← убраны userID=int64(1), ?user_id=
+└── internal/handler/subscription.go                 ← убраны userID=int64(1) (3 места)
+
+deploy/env/gateway.env.template                      ← +JWT_SECRET=${AUTH_JWT_SECRET}
+deploy/compose/docker-compose.yml                    ← gateway env: +JWT_SECRET: ${AUTH_JWT_SECRET}
+
+docs/services/auth-middleware.md                     ← NEW → статус "реализовано"
+docs/services/README.md                              ← + ссылка на auth-middleware.md
+```
+
+**Критический bug-fix:** до Этапа 4 любой мог послать `?user_id=5` и получить VPN-ссылку чужого юзера. Теперь `user_id` берётся **только** из подписанного токена, query-параметр игнорируется. Дыра закрыта.
+
+**Что осознанно НЕ сделано:**
+- Refresh-токены — пока один JWT с TTL=168h (7 дней). Когда истечёт — Mini App сам дёрнет `/auth/validate` с свежим initData и получит новый токен. Refresh-pattern добавим если начнут жаловаться, пока не критично.
+- Role-check для админских ручек (`role == "admin"`) — будет на Этапе 8 (Admin Service).
+- Revoke / blacklist токенов — пока нет. Бан юзера через `users.is_banned = true` + проверка в middleware (TODO на будущее).
 
 ---
 
 ### Этап 5 — Payment Service (2-3 дня) 🔴 Критический
-Зависит от выбора: Telegram Stars / ЮKassa.
+Выбран: **Telegram Stars** (по решению Этапа 0). Payment Service — единственный сервис в MVP, который общается с внешним Telegram Bot API.
 
-**5.1 Общее:**
-- [ ] Создать `services/payment-service/` по шаблону других
-- [ ] Порт: **50053**
-- [ ] Proto: `CreatePayment`, `GetPaymentStatus`, `HandleWebhook`, `ListUserPayments`
-- [ ] Таблица `payments` (уже есть в `schema.sql`, накатить миграцию)
+**5.1 Инфра:**
+- [ ] 🔵 **[СТОП, ПРОДОЛЖИТЬ ОТСЮДА]** Создать `services/payment-service/` по шаблону других (`cmd/main`, `internal/{app,api,service,repository,config}`)
+- [ ] Порт: **50063**, префикс env `PAYMENT_*`
+- [ ] Proto `shared/proto/payment/v1/payment.proto`:
+  - `CreateInvoice(user_id, plan_id, max_devices)` → `{invoice_link: "https://t.me/$...", payment_id}`
+  - `GetPayment(payment_id)` → `{status, amount_stars, created_at, external_id}`
+  - `ListUserPayments(user_id, limit, offset)` → `[]Payment`
+  - `HandleTelegramUpdate(raw_json)` → `{ok: bool}` (вызывается из webhook handler в Gateway)
+- [ ] Миграция `003_create_payments.up.sql` (service-specific):
+  ```sql
+  CREATE TABLE payments (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT REFERENCES users(id),
+    plan_id INT REFERENCES subscription_plans(id),
+    max_devices INT NOT NULL,
+    amount_stars INT NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'pending', -- pending/paid/failed/refunded
+    external_id VARCHAR(255) UNIQUE,              -- telegram_payment_charge_id (для идемпотентности)
+    provider VARCHAR(50) NOT NULL DEFAULT 'telegram_stars',
+    metadata JSONB,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    paid_at TIMESTAMPTZ
+  );
+  CREATE INDEX idx_payments_user ON payments(user_id);
+  CREATE INDEX idx_payments_status ON payments(status);
+  ```
+- [ ] Миграция `003_add_stars_price.up.sql` (subscription-service):
+  ```sql
+  ALTER TABLE subscription_plans ADD COLUMN price_stars INT NOT NULL DEFAULT 0;
+  ALTER TABLE device_addon_pricing ADD COLUMN price_stars INT NOT NULL DEFAULT 0;
+  UPDATE subscription_plans SET price_stars = ... WHERE ...;
+  ```
+  Пример цен (consult с aziz):
+  | План | 2 устройства | 5 устройств | 10 устройств |
+  |---|---:|---:|---:|
+  | 1 мес | 100⭐ | 200⭐ | 350⭐ |
+  | 3 мес | 250⭐ | 500⭐ | 900⭐ |
+  | 6 мес | 450⭐ | 900⭐ | 1600⭐ |
+  | 12 мес | 800⭐ | 1600⭐ | 2800⭐ |
 
-**5.2 Telegram Stars (выбран):**
-- [ ] Интеграция с Bot API `sendInvoice` (`currency: "XTR"`)
-- [ ] Нужен отдельный небольшой сервис (или endpoint в payment-service) для общения с Telegram Bot API
-- [ ] Webhook от Telegram: `pre_checkout_query` → подтверждаем, потом `successful_payment` → активация
-- [ ] В боте (`@maydavpnbot`) настроить обработчики `pre_checkout_query` + `successful_payment`
-- [ ] Цены задаём в Stars (1 Star ≈ 0.013$ — но это для статистики, в UI показываем ⭐)
-- [ ] Пример: 1 мес × 1 устройство = 100⭐, 12 мес × 3 устройства = 1500⭐
+**5.2 Создание инвойса:**
+- [ ] `POST /api/v1/payments` (защищённая JWT-ручка, `user_id` из контекста)
+  - Body: `{"plan_id": 1, "max_devices": 2}`
+  - Payment Service:
+    1. `price_stars = SELECT FROM device_addon_pricing WHERE plan_id + max_devices`
+    2. `INSERT INTO payments (status='pending', amount_stars)` → `payment_id`
+    3. Вызов `telegram.createInvoiceLink(title, description, payload=payment_id, currency="XTR", prices=[{amount:price_stars, label:...}])`
+    4. Возврат клиенту `invoice_link`
+  - Mini App открывает ссылку: `window.Telegram.WebApp.openInvoice(invoice_link)`
 
-**5.3 Общий флоу:**
-- [ ] `POST /api/v1/payments` → создаёт платёж, возвращает URL/invoice
-- [ ] Webhook → Payment Service проверяет подпись → меняет статус в БД → дёргает Subscription Service (`CreateSubscription`) → дёргает VPN Service (`CreateVPNUser`)
-- [ ] Атомарность: если один шаг упал — откат или retry через outbox pattern
-- [ ] Все платежи логируются в `payments` таблицу
+**5.3 Webhook (critical path):**
+- [ ] В Gateway добавить `POST /api/v1/telegram/webhook` (публичная ручка! но с валидацией `X-Telegram-Bot-Api-Secret-Token`)
+- [ ] Gateway → Payment Service `HandleTelegramUpdate`
+- [ ] **Два типа обновлений от Telegram:**
+  1. `pre_checkout_query` — Telegram спрашивает подтверждение. Ответить `answerPreCheckoutQuery(ok=true)` в течение 10 секунд
+  2. `successful_payment` — фактическая оплата прошла. Тут вся логика:
+     - **Идемпотентность:** `SELECT * FROM payments WHERE external_id = telegram_payment_charge_id`. Если найдено — вернуть 200 (Telegram ретраит до 30 минут при 5xx).
+     - `UPDATE payments SET status='paid', paid_at=NOW(), external_id=?` — **в одной транзакции** с:
+     - Вызов `subscription-service.CreateSubscription(user_id, plan_id, max_devices)` (grpc)
+     - Вызов `vpn-service.CreateVPNUser(user_id, subscription_id)` (grpc)
+     - Ответ клиенту: в Mini App через WebApp event `successfulPayment`
+
+**5.4 Refund flow (edge case):**
+- [ ] Если пришёл `refunded_payment` (Telegram поддерживает refund через Stars в течение 21 дня):
+  - `UPDATE payments SET status='refunded'`
+  - `UPDATE subscriptions SET status='refunded', expires_at=NOW()` (досрочно)
+  - Вызов `vpn-service.DisableVPNUser` → `xray.RemoveUser(email)` ← **TODO Этап 5: новый метод**
+
+**5.5 Конфиг Telegram:**
+- [ ] Через `@BotFather` → `Payments` → переключить между **Test / Live**. На dev всегда test.
+- [ ] Для test-mode реальные Stars не списываются, но флоу идентичный — хорошо для e2e.
+- [ ] Webhook URL: `https://<cloudflare-tunnel>/api/v1/telegram/webhook` — регистрируется через `setWebhook`. На dev — skip (без публичного URL не получится). На VPS — в Этапе 9.
+
+**5.6 Checklist e2e:**
+- [ ] Test-режим: создать инвойс → OpenInvoice в dev mini app → "Pay" → проверить webhook прилетел → в БД `payments.status='paid'`, `subscriptions.status='active'`, `vpn_users` создан
+- [ ] Повторный webhook с тем же `payment_charge_id` → БД не меняется, ответ 200
+- [ ] Отмена в `pre_checkout_query` → платёж остаётся `pending` (auto-fail через 24 часа cron'ом)
+
+**5.7 Выявленные зависимости (новые задачи):**
+- [ ] `vpn-service.DisableVPNUser(userID)` — удаление из Xray при refund/expire (появился на Этапе 2 как TODO, закрываем здесь)
+- [ ] Cron в subscription-service: каждые 10 минут `SELECT * FROM subscriptions WHERE expires_at < NOW() AND status='active'` → `UPDATE status='expired'` → `vpn-service.DisableVPNUser`
 
 ---
 
 ### Этап 6 — Multi-server архитектура (1 день, 1 сервер на старте)
 
-**Важно:** На MVP разворачиваем **только 1 Xray VPS**, но архитектура готова к multi-server. Добавление второго/третьего — отдельная задача после первых продаж.
+**Важно:** на MVP поднимаем **только 1 Xray** (локально или 1 VPS). Архитектура уже готова к multi-server — цикл по `SELECT * FROM vpn_servers WHERE is_active` в `service.CreateVPNUser` (Этап 2 реализован). Реальное добавление 2-го/3-го сервера — отдельная задача после первых продаж.
 
-- [ ] При `CreateVPNUser` — добавлять UUID на ВСЕ активные серверы из `vpn_servers` (на старте 1, но код не должен предполагать 1)
-- [ ] В UI фронта: показывать список серверов, юзер нажимает → получает ссылку на конкретный сервер
-- [ ] Cron health-check каждые 60с → `load_percent` обновляется по `active_connections`
-- [ ] Тест: добавить в БД фейковую 2-ю строку — убедиться что код не падает
-- [ ] Подготовить Ansible/скрипт для быстрого развёртывания Xray на новой VPS (чтобы в будущем `./deploy-xray.sh новый.сервер` было достаточно)
+- [x] ✅ При `CreateVPNUser` — добавление UUID на ВСЕ активные серверы из `vpn_servers` (реализовано в Этапе 2)
+- [ ] В UI фронта: показывать список серверов (`GET /api/v1/vpn/servers`), юзер нажимает → получает ссылку на конкретный сервер (`GET /api/v1/vpn/servers/:id/link` уже работает)
+- [ ] Cron в vpn-service: каждые 60с обновлять `vpn_servers.load_percent = COUNT(active_connections WHERE server_id=X) * 100 / server_max_connections`. `server_max_connections` — новая колонка в `vpn_servers` (по умолчанию 1000 для dev).
+- [ ] Тест: вручную вставить в БД 2-ю строку `vpn_servers (is_active=true)` → убедиться что CreateVPNUser добавляет юзера в оба (или в только-достижимый, с graceful degradation)
+- [ ] Скрипт `deploy/scripts/deploy-xray-new.sh <host>`:
+  - ssh → установка docker
+  - сгенерить новые Reality keys
+  - запустить Xray compose на новом хосте
+  - вывести SQL для `INSERT INTO vpn_servers (...)` — aziz выполняет вручную в проде
+  - re-seed всех существующих VPN users в новый inbound (новый метод `vpn-service.ResyncServer(server_id)`)
 
 ---
 
 ### Этап 7 — Referral Service (1.5 дня)
-- [ ] Создать `services/referral-service/`, порт **50054**
-- [ ] Миграция: таблицы `referral_links`, `referral_bonuses`
-- [ ] Proto: `CreateReferralLink`, `TrackClick`, `RegisterReferral`, `GetReferralStats`
-- [ ] При регистрации нового юзера с `?ref=TOKEN`:
-  - +3 дня к первой подписке приглашённому
-  - +3 дня пригласителю (отложенно — когда приглашённый купит подписку)
-- [ ] Эндпоинт `GET /api/v1/referral/link` → возвращает уникальную ссылку юзера
-- [ ] Эндпоинт `GET /api/v1/referral/stats` → кол-во приглашённых, заработанные дни
-- [ ] UI экран "Пригласить друга" во фронте
+
+**7.1 Инфра:**
+- [ ] Создать `services/referral-service/`, порт **50064**, префикс env `REFERRAL_*`
+- [ ] Миграция:
+  ```sql
+  CREATE TABLE referral_links (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT UNIQUE NOT NULL REFERENCES users(id),   -- one user = one token
+    token VARCHAR(16) UNIQUE NOT NULL,                      -- random 8-byte hex
+    click_count INT DEFAULT 0,                              -- increments на каждый deep-link open
+    created_at TIMESTAMPTZ DEFAULT NOW()
+  );
+  CREATE TABLE referral_bonuses (
+    id BIGSERIAL PRIMARY KEY,
+    inviter_id BIGINT NOT NULL REFERENCES users(id),
+    invited_id BIGINT NOT NULL REFERENCES users(id),
+    status VARCHAR(20) NOT NULL DEFAULT 'pending',          -- pending → rewarded → (no revoke)
+    bonus_days INT NOT NULL DEFAULT 3,
+    rewarded_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(invited_id)                                      -- каждый юзер — только 1 inviter
+  );
+  ```
+- [ ] Proto: `GetOrCreateReferralLink(user_id)`, `RegisterReferral(inviter_token, invited_user_id)`, `GetReferralStats(user_id)`, `ApplyPendingBonus(invited_user_id)` (дёргается Payment Service'ом когда приглашённый купил первую подписку)
+
+**7.2 Deep-link формат:**
+- Telegram Mini App не поддерживает query-строки через браузер. Deep-link-формат:
+  ```
+  https://t.me/maydavpnbot?startapp=ref_a1b2c3d4
+  ```
+- Mini App получает это из `window.Telegram.WebApp.initDataUnsafe.start_param`, парсит префикс `ref_` → извлекает token → отдаёт в `POST /api/v1/auth/validate {init_data, ref_token}`.
+- Auth Service: если юзер НОВЫЙ (первая регистрация) И `ref_token` валиден → вызов `referral-service.RegisterReferral(inviter_token, invited_user_id)`.
+
+**7.3 Anti-abuse (критично):**
+- [ ] **Self-invite:** `inviter.telegram_id != invited.telegram_id` — валидация в `RegisterReferral`
+- [ ] **One inviter per invited:** `UNIQUE(invited_id)` в БД + проверка в коде
+- [ ] **Existing user can't become "invited":** проверка `invited_user_created_at < 1 minute` — реферал считается только для только-что созданных юзеров
+- [ ] **Rate limit на генерацию links:** один юзер — один токен навсегда (ON CONFLICT DO NOTHING), нельзя "перекрутить" 100 разных реф-ссылок
+- [ ] **Bot-friendly token:** 8 байт hex (URL-safe, коротко, 2^64 коллизий пренебрежимо)
+
+**7.4 State-machine бонусов:**
+```
+invited_user_id регистрируется с ref_TOKEN
+  → INSERT referral_bonuses (status='pending')
+  → Приглашённый сразу получает +3 дня к ПЕРВОЙ будущей подписке
+    (хранится как pending discount в users.pending_bonus_days INT, списывается при CreateSubscription)
+
+invited_user_id делает первую оплату (payment-service успех)
+  → payment-service вызывает referral-service.ApplyPendingBonus(invited_id)
+  → UPDATE referral_bonuses SET status='rewarded', rewarded_at=NOW()
+  → Пригласитель получает +3 дня к АКТИВНОЙ подписке (subscription.expires_at += 3 дня)
+    если активной подписки нет — бонус накапливается в users.pending_bonus_days для будущей
+```
+
+**7.5 API:**
+- [ ] `GET /api/v1/referral/link` → `{url: "https://t.me/maydavpnbot?startapp=ref_a1b2c3d4", token: "a1b2c3d4"}`
+- [ ] `GET /api/v1/referral/stats` → `{invited_count: 5, pending_count: 2, rewarded_days_total: 9, my_pending_days: 0}`
+- [ ] Модификация Auth Service: `ValidateTelegramUserRequest.ref_token` (opt) + при создании нового юзера вызов `referral-service.RegisterReferral`
+- [ ] Модификация Payment Service: после `successful_payment` → дёрнуть `referral-service.ApplyPendingBonus(user_id)`
+
+**7.6 Frontend (в vpn_next):**
+- [ ] Экран "Пригласить друга" с кнопкой "Поделиться" — вызов Telegram WebApp `shareStory` или копирование ссылки в clipboard
+- [ ] Счётчик приглашённых + бонусных дней в профиле
 
 ---
 
 ### Этап 8 — Admin Service (1 день)
-- [ ] Создать `services/admin-service/`, порт **50055**
-- [ ] Middleware: требует JWT с `role=admin`
-- [ ] Proto: `ListUsers`, `GetUserDetails`, `BanUser`, `ListSubscriptions`, `ListPayments`, `GetDashboardStats`
-- [ ] Роуты в Gateway: `/api/v1/admin/*` (под JWT+role проверкой)
-- [ ] Простая админка в `vpn_next`:
-  - `/admin/users` — таблица юзеров, фильтры, кнопка "бан"
-  - `/admin/subscriptions` — список подписок
-  - `/admin/payments` — список платежей + сумма выручки
-  - `/admin/stats` — dashboard (MAU, MRR, conversion)
+
+**8.1 Инфра:**
+- [ ] Создать `services/admin-service/`, порт **50065**, префикс env `ADMIN_*`
+- [ ] Добавить в `platform/pkg/middleware/jwt.go` хелпер `RequireRole("admin")` — middleware поверх `JWTMiddleware`, проверяет `role=="admin"` из контекста. 403 `{"error":"forbidden"}` при несоответствии.
+- [ ] Proto: `ListUsers(limit, offset, search)`, `GetUserDetails(user_id)`, `BanUser(user_id, is_banned)`, `ListSubscriptions(filter, limit, offset)`, `ListPayments(filter, limit, offset)`, `GetDashboardStats()` → `{total_users, active_subs, mrr_stars, today_revenue, today_new_users}`
+- [ ] Роуты в Gateway: `r.Route("/api/v1/admin", func(r){ r.Use(jwtMw, RequireRole("admin")); ... })` — **двойная защита** (JWT + роль)
+
+**8.2 Назначение первого админа (bootstrap):**
+- [ ] В миграции auth-service сид — ничего не автоматизируем, aziz сам делает:
+  ```sql
+  UPDATE users SET role='admin' WHERE telegram_id = <aziz_tg_id>;
+  ```
+  После этого его текущий JWT невалиден (role изменилась) — нужен re-login.
+
+**8.3 Пагинация + фильтры:**
+- [ ] Все List-ручки обязательно с `limit INT (default 50, max 200)` и `offset INT`
+- [ ] Search по users: `telegram_id`, `username`, `first_name` (LIKE %search%)
+- [ ] Фильтры subscriptions: `status in (active, expired, refunded)`
+- [ ] Фильтры payments: `status`, `date_from`, `date_to`
+
+**8.4 Audit log (опционально, но желательно):**
+- [ ] Таблица `admin_actions (id, admin_id, action, target_id, metadata, created_at)` — пишется при каждом `BanUser`, `UpdateRole` (Этап 8) или изменении подписки
+- [ ] Видна в UI на странице каждого юзера → история модерации
+
+**8.5 Frontend (vpn_next):**
+- [ ] Простая админка — **отдельные роуты под JWT + role check на клиенте**:
+  - `/admin/users` — таблица + search + "бан" кнопка
+  - `/admin/subscriptions` — список с фильтрами по статусу
+  - `/admin/payments` — список + `SUM(amount_stars)` за период
+  - `/admin/stats` — карточки: MAU / MRR(Stars) / conversion / total users / today new users
+- [ ] Для dev/prod одна кодовая база — просто role-based routing
 
 ---
 
-### Этап 9 — Deployment + SSL (1 день)
-- [ ] `docker-compose.yml` для всего стека (backend + postgres) на backend VPS
-- [ ] Xray + Nginx (reverse proxy для Xray maskering) на Xray VPS — отдельный docker-compose
-- [ ] **Cloudflare Tunnel** на backend VPS вместо nginx/SSL (проще, быстрее, бесплатно):
-  - `cloudflared tunnel` на backend VPS → публикует gateway (`:8081`) как `https://*.trycloudflare.com` или (позже) через именованный туннель на свой домен
-  - Mini App URL — этот туннель
-- [ ] Next.js Mini App задеплоить: **Vercel** (бесплатно, CI/CD из коробки) или на backend VPS через Cloudflare tunnel
-- [ ] Настроить Mini App URL в `@BotFather`
-- [ ] Secrets через `.env` файл (не в git!), в проде через docker secrets или CI vault
-- [ ] **TODO на будущее:** переехать с Cloudflare trycloudflare.com на свой домен (простая операция, но не срочно)
+### Этап 9 — Deployment + SSL (1-1.5 дня)
+
+**Решение:** для MVP **1 VPS на весь стек** (backend + postgres + xray в одном docker-compose). Разделить на 2 VPS имеет смысл когда 100+ активных юзеров или если хочется изолировать Xray на случай компрометации backend'а — это не MVP-проблема.
+
+**⚠️ Удалить из плана:** строка "Xray + Nginx (reverse proxy для Xray maskering)" из оригинального плана **ошибочна**. Reality сам маскируется под TLS-трафик (mimicry через `dest: github.com:443`). Nginx перед Xray не нужен и только добавит задержки.
+
+**9.1 VPS setup:**
+- [ ] Купить VPS: **Hetzner** (CX11 €4/мес), **Contabo** ($7/мес) или **PQ.hosting** (принимает рубли и Stars). Минимум: 2GB RAM, 20GB SSD, 1 vCPU, Ubuntu 24.04.
+- [ ] `apt install docker.io docker-compose-v2` → добавить юзера в docker group
+- [ ] `ufw allow ssh, 8443/tcp (VLESS)` — больше **ничего не открывать наружу**. 8081 gateway закрыт, доступен только через Cloudflare Tunnel.
+- [ ] `git clone` репо → `cp deploy/env/.env.template deploy/env/.env` → заполнить prod-значения (сильный postgres-пароль, свежие Reality keys через `task xray:genkeys`, `AUTH_JWT_SECRET=$(openssl rand -base64 48)`, production bot token из `@BotFather`)
+- [ ] `task compose:up` — стартует 6 контейнеров (postgres, migrate, auth, sub, vpn, gateway, xray)
+- [ ] Миграции накатываются контейнером `migrate` при каждом `compose:up` (идемпотентно через `x-migrations-table`)
+
+**9.2 Публичный доступ через Cloudflare Tunnel:**
+- [ ] Зарегистрировать бесплатный Cloudflare account, привязать домен (купить на namecheap/reg.ru — ~$10/год)
+- [ ] `cloudflared tunnel login` → авторизация
+- [ ] `cloudflared tunnel create vpn-maydavpn` — создаёт **именованный** туннель (в отличие от `trycloudflare.com` не меняет URL при рестарте)
+- [ ] Создать `~/.cloudflared/config.yml`:
+  ```yaml
+  tunnel: <tunnel-id>
+  credentials-file: /root/.cloudflared/<tunnel-id>.json
+  ingress:
+    - hostname: api.maydavpn.com
+      service: http://localhost:8081
+    - service: http_status:404
+  ```
+- [ ] DNS: `cloudflared tunnel route dns vpn-maydavpn api.maydavpn.com`
+- [ ] Запуск как systemd service: `cloudflared service install`
+- [ ] **Mini App URL** → `https://api.maydavpn.com` (через `@BotFather` → Mini App setup)
+
+**9.3 Frontend деплой (vpn_next):**
+- [ ] Вариант A (рекомендуется): **Vercel** — бесплатно, auto-deploy из GitHub. Set `NEXT_PUBLIC_API_URL=https://api.maydavpn.com` в Vercel env.
+- [ ] Вариант B: на том же VPS в Docker, публикуется через тот же Cloudflare Tunnel на `app.maydavpn.com`.
+
+**9.4 Webhook Telegram (после деплоя):**
+- [ ] `curl -X POST 'https://api.telegram.org/bot$BOT_TOKEN/setWebhook' -d 'url=https://api.maydavpn.com/api/v1/telegram/webhook&secret_token=<random>'`
+- [ ] Проверить `getWebhookInfo` — должен быть `pending_update_count: 0` и свежий URL
+
+**9.5 Backup postgres (критично!):**
+- [ ] Скрипт `deploy/scripts/backup.sh`:
+  ```bash
+  #!/bin/bash
+  set -e
+  DATE=$(date +%Y%m%d_%H%M%S)
+  docker exec vpn-postgres pg_dump -U vpn vpn | gzip > /var/backups/vpn/db_$DATE.sql.gz
+  # Ротация: держать 7 последних дневных + 4 недельных
+  find /var/backups/vpn -name "db_*.sql.gz" -mtime +7 -delete
+  # Upload в S3/R2/B2 (rclone)
+  rclone copy /var/backups/vpn/db_$DATE.sql.gz r2:vpn-backups/
+  ```
+- [ ] Cron: `0 3 * * * /opt/vpn/backup.sh`
+- [ ] Тест восстановления: `gunzip < db_YYYYMMDD.sql.gz | docker exec -i vpn-postgres psql -U vpn vpn`
+
+**9.6 Secrets management:**
+- [ ] `.env` файл лежит на VPS в `/opt/vpn/deploy/env/.env`, chmod 600, владелец root
+- [ ] **Никогда не коммитить** в git (уже в .gitignore через `*.env` + `!*.env.template`)
+- [ ] Для CI/CD деплоя (Этап 10) — GitHub Secrets или SOPS + age-encrypted файл в репе
+- [ ] Reality private key + JWT_SECRET + postgres password — только в `.env`, не в docker image
+
+**9.7 SSL / HTTPS:**
+- [ ] Cloudflare Tunnel автоматически даёт SSL (TLS termination на Cloudflare edge). Запросы юзеров: `https://api.maydavpn.com` → Cloudflare → зашифрованный QUIC туннель до VPS → plain `http://localhost:8081`.
+- [ ] Настроить Cloudflare SSL mode: **"Full (strict)"** — включено по умолчанию для tunnel'а.
+
+**9.8 Post-deploy smoke test:**
+- [ ] `curl https://api.maydavpn.com/health` → 200
+- [ ] `curl https://api.maydavpn.com/api/v1/subscriptions/plans` → JSON
+- [ ] Открыть Mini App в Telegram → авторизация → купить подписку (test mode Stars) → получить VLESS-ссылку → импортировать в Streisand (iOS) / v2rayNG (Android) → подключиться → `https://ipinfo.io` → IP = VPS
 
 ---
 
 ### Этап 10 — CI/CD + Мониторинг (1 день)
-- [ ] GitHub Actions: на push в `master` → build всех сервисов → push docker images в GHCR
-- [ ] Автодеплой: CI ssh в прод VPS → `docker-compose pull && up -d`
-- [ ] Healthcheck endpoints на всех сервисах (`/health` — есть в gateway, добавить в остальные)
-- [ ] Uptime-мониторинг (UptimeRobot / BetterStack) пинг `/health`
-- [ ] Алерты в Telegram (свой бот в приватный чат админа)
-- [ ] Логи собираются в `logs/` с ротацией
+
+**10.1 CI (GitHub Actions):**
+- [ ] Workflow `.github/workflows/ci.yml`:
+  - На push в `master`: `task build-all` + `go test ./...` (тесты появятся по мере написания)
+  - `task proto:gen` проверяет что генерация proto не даёт diff (чтобы не забыли коммитнуть)
+- [ ] Workflow `.github/workflows/release.yml`:
+  - На tag `v*` или manual dispatch: docker build всех сервисов → push в GHCR (`ghcr.io/<user>/vpn-auth:v1.2.3`)
+  - Versioning через git tags
+
+**10.2 Deploy:**
+- [ ] Скрипт `deploy/scripts/deploy.sh` на VPS:
+  ```bash
+  cd /opt/vpn && git pull && docker compose -f deploy/compose/docker-compose.yml --env-file deploy/env/.env up -d --build
+  ```
+- [ ] GitHub Actions через SSH (deploy key) дёргает скрипт. Или проще — cron `*/5 * * * *` на VPS который `git pull && docker compose up -d` если есть изменения. Начать с cron, добавить CI-триггер позже.
+
+**10.3 Healthchecks:**
+- [ ] `/health` уже есть в gateway. Добавить **gRPC health reflection** в auth/sub/vpn/payment/referral/admin — `google.golang.org/grpc/health/v1`.
+- [ ] В docker-compose добавить `healthcheck:` блок для каждого сервиса (через `grpc_health_probe` binary).
+
+**10.4 Мониторинг:**
+- [ ] **UptimeRobot** (бесплатно): ping `https://api.maydavpn.com/health` каждые 5 минут → SMS/Telegram на падении
+- [ ] **Алерты в Telegram:** создать `@maydavpn_alerts_bot` отдельный — получает webhook'и от UptimeRobot и шлёт в приватный чат admin-у
+- [ ] **Логи:** zap в stdout → `docker compose logs` → ротация через docker опцию `--log-opt max-size=100m max-file=5` (в compose уже не забыть)
+- [ ] **Метрики (опционально):** Prometheus + Grafana в том же compose или Grafana Cloud (free tier). Пока не критично, добавим если понадобится.
+- [ ] **Sentry (опционально):** для error tracking в Go — `github.com/getsentry/sentry-go`. На MVP можно пропустить.
 
 ---
 
 ### Этап 11 — Юридическое + Launch (0.5-1 день)
-- [ ] Написать **оферту** (публичный договор) и положить на `/offer`
-- [ ] Написать **политику конфиденциальности** — `/privacy`
-- [ ] Добавить ссылки на оферту/политику в UI (checkbox при первой покупке)
-- [ ] Создать тестового юзера (не себя) и пройти полный флоу
-- [ ] Протестировать с 3-5 реальными юзерами (друзья) — собрать баги
-- [ ] Починить критичные баги
-- [ ] 🚀 **Публичный запуск**
+
+**11.1 Документы:**
+- [ ] **Оферта** (публичный договор) — для MVP можно взять шаблон с https://tinkoff.ru или https://legalus.ru, адаптировать. Основные пункты:
+  - Тип услуги (защищённый доступ в интернет, без логирования пользовательского трафика)
+  - Порядок оплаты (через Telegram Stars non-refundable кроме случаев по правилам Telegram)
+  - Отказ от ответственности за контент
+  - Юрисдикция (куда покупатель может жаловаться)
+  - Положить как статический файл в vpn_next `/public/offer.md` + страница `/offer`
+- [ ] **Политика конфиденциальности** — `/privacy`:
+  - Какие данные собираем: Telegram user_id, username, first_name, last_name, ip не логируем, payment история да
+  - Cookies Mini App (минимум)
+  - Срок хранения: пока подписка активна + 90 дней
+  - Права субъекта: удалить аккаунт через @support
+- [ ] Checkbox "Я согласен с офертой" перед первой оплатой (обязательный)
+
+**11.2 Pre-launch checklist (за день до запуска):**
+- [ ] `.env` переменные на VPS: JWT_SECRET ≥ 48 байт, POSTGRES_PASSWORD ≥ 20 байт, Reality keys свежие
+- [ ] Cloudflare Tunnel работает стабильно 24+ часа
+- [ ] Backup БД проверен (тест restore)
+- [ ] Telegram webhook зарегистрирован, `pending_update_count = 0`
+- [ ] Первый админ назначен (`users.role='admin'` для aziz)
+- [ ] UptimeRobot мониторит `/health`
+- [ ] Дежурный канал для алертов работает
+- [ ] Выпущен первый git-тег `v0.1.0`
+
+**11.3 Closed beta (friends):**
+- [ ] Пригласить 3-5 человек (друзья) через реальные реф-ссылки
+- [ ] Каждый проходит полный флоу: регистрация → оплата → подключение с iOS/Android/PC
+- [ ] Собрать баги в Issues, починить **критичные** (flow-ломающие), остальные как `post-launch`
+
+**11.4 Канал поддержки:**
+- [ ] Отдельный бот `@maydavpn_support_bot` или аккаунт `@maydavpn_support` (обычный Telegram юзер-админ)
+- [ ] В Mini App — кнопка "Написать в поддержку" → `t.me/maydavpn_support`
+- [ ] Админ реагирует вручную (не автоматика). MVP ок.
+
+**11.5 🚀 Публичный запуск:**
+- [ ] Пост в личных каналах / чатах aziz
+- [ ] Опционально: ProductHunt, TGstats, список VPN-ботов
+- [ ] Мониторинг первых 48 часов: UptimeRobot + `docker compose logs -f | grep -iE 'error|panic'`
+- [ ] Готовность к rollback: знать команду `git checkout v0.1.0 && task compose:up`
 
 ---
 
 ## 📋 Суммарная таблица усилий
 
-| Этап | Дней | Блокер | Риски |
-|---|:---:|:---:|---|
-| 0. Инфра/решения | — | 🔴 Старт | Долго покупать VPS/ИП |
-| 1. Фундамент | 1 | | Низкие |
-| 2. Xray | 2-3 | 🔴 | Reality капризный |
-| 3. Device limit | 0.5 | | Низкие |
-| 4. JWT middleware | 0.5 | | Низкие |
-| 5. Payment | 2-3 | 🔴 | Webhook/idempotency |
-| 6. Multi-server | 1 | | 2 доп. VPS |
-| 7. Referral | 1.5 | | Низкие |
-| 8. Admin | 1 | | Низкие |
-| 9. Deploy+SSL | 1 | | DNS проблемы |
-| 10. CI/CD | 1 | | Низкие |
-| 11. Юридика/Launch | 1 | | Юрист? |
-| **Итого** | **12-14 дней** | | |
+| Этап | Оценка | Факт | Статус | Риски |
+|---|:---:|:---:|:---:|---|
+| 0. Инфра/решения | — | — | ✅ | — |
+| 1. Фундамент | 1-2 дня | 1 сессия | ✅ | Сняты |
+| 2. Xray | 2-3 дня | 1 сессия | ✅ | Сняты (Reality работает) |
+| 3. Device limit | 0.5 дня | 1 сессия | ✅ | Сняты |
+| 4. JWT middleware | 0.5 дня | 1 сессия | ✅ | Сняты |
+| 5. Payment 🔴 | 2-3 дня | — | ⬜ | Idempotency, webhook retry, test-mode Stars |
+| 6. Multi-server | 1 день | — | ⬜ | Re-seed юзеров на новый сервер |
+| 7. Referral | 1.5 дня | — | ⬜ | Anti-abuse (self-invite, double-dip) |
+| 8. Admin | 1 день | — | ⬜ | Role bootstrap + audit log |
+| 9. Deploy+SSL | 1-1.5 дня | — | ⬜ | Cloudflare Tunnel стабильность, backup |
+| 10. CI/CD + Monitoring | 1 день | — | ⬜ | Низкие |
+| 11. Юридика/Launch | 0.5-1 день | — | ⬜ | Оферта-шаблон подходит под Stars? |
+| **Осталось** | **8-10 дней** | — | | |
 
 ---
 
 ## ⚠️ Риски и смягчения
 
+### Закрытые (исполненные этапы)
+| Риск | Исход |
+|---|---|
+| ~~Xray Reality handshake ломается~~ | ✅ Работает (e2e в Этапе 2: curl → SOCKS5 → Reality → ipinfo.io) |
+| ~~ЮKassa не одобрит магазин~~ | ✅ Выбрали Telegram Stars, этот риск снят |
+| ~~Reality-ключи утекут через git~~ | ✅ `.gitignore` с `*.env + !*.env.template` + `deploy/compose/xray/config.json` gitignored |
+| ~~Подмена `?user_id=99` в query-параметре~~ | ✅ JWT middleware (Этап 4), query `user_id` игнорируется |
+
+### Актуальные на оставшиеся этапы
 | Риск | Вероятность | Удар | Смягчение |
 |---|---|---|---|
-| Xray Reality handshake ломается при определённых клиентах | Высокая | Средний | Тестировать на Android/iOS/PC заранее, иметь fallback на обычный VLESS без Reality |
-| ЮKassa не одобрит магазин (VPN серая зона в РФ) | Высокая | Высокий | Запасной вариант Telegram Stars |
-| Reality-ключи утекут → все юзеры разлогинены | Низкая | Высокий | Не коммитить ключи, хранить в `.env`/secrets |
-| Пользователей больше чем max_connections у Xray | Низкая | Средний | Мониторинг load_percent, автоматический ротатор |
-| Атака на API (бруто JWT/spamm webhook) | Средняя | Средний | Rate limiting в Gateway (chi middleware есть) |
+| Telegram дублирует webhook → двойное начисление подписки | Высокая | Высокий | **UNIQUE `payments.external_id`** + idempotent handler (Этап 5.3) |
+| Gateway упал во время `successful_payment` → Telegram ретраит 30 мин, но у нас нет обработчика | Низкая | Высокий | Healthcheck + auto-restart docker + UptimeRobot (Этап 10) |
+| Cloudflare Tunnel теряет connection → Mini App недоступно | Низкая | Высокий | Named tunnel + systemd restart; fallback — вернуться на nginx+certbot если Cloudflare стабильно падает |
+| Xray рестартует → все VLESS users в RAM потеряны | Средняя | Высокий | **Re-seed при старте vpn-service** (TODO, закрывается вместе с Этапом 6) |
+| БД `postgres` повреждена / потеряна | Низкая | Критический | **pg_dump в cron + rclone в S3/R2** (Этап 9.5) + тест restore |
+| Reality private key утечёт (dev key в git) | Средняя | Высокий | **Сменить все ключи на проде** через `task xray:genkeys` (Этап 9.1); dev-ключи остаются в .env.template |
+| Referral abuse (один юзер регает 100 фейк-аккаунтов) | Высокая | Средний | Anti-abuse в 7.3 + ручной контроль в админке |
+| Telegram banит бота (VPN серая зона) | Средняя | Критический | ToS говорят "nope VPN не запрещён". Бэкап-план: иметь второй бот + inactive copy данных |
+| Rate-limit DDoS на `/auth/validate` | Средняя | Средний | **Rate limiting chi middleware** в Gateway (добавить в Этап 4 ex-post или 10): `github.com/go-chi/httprate` 100 req/min per IP |
+| Юзер жалуется в Telegram Support → возврат денег → у нас не удалён из Xray | Низкая | Средний | `refunded_payment` webhook → `vpn-service.DisableVPNUser` (Этап 5.4) |
+
+### Cross-cutting TODOs (не привязаны к этапам, надо держать в голове)
+- **Rate limiting** в Gateway — добавить хотя бы на `/auth/validate` и `/payments` до Этапа 9
+- **Re-seed Xray при рестарте** — реализовать в vpn-service `app.Start()` вместе с Этапом 6
+- **Graceful shutdown xray** — дать 30с на закрытие VLESS-соединений
+- **Ротация Reality keys** — как поменять без простоя? Документ-gist: добавить новый short_id, дать время клиентам обновить ссылку, потом удалить старый
+- **Бан юзера через middleware** — сейчас `users.is_banned=true` выставляется, но токен продолжает работать. Надо в JWT middleware добавить проверку `SELECT is_banned FROM users WHERE id=?` (или bloom-filter cached)
 
 ---
 
