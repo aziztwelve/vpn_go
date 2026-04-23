@@ -57,6 +57,14 @@
 {$CDN_DOMAIN} {
 	encode gzip zstd
 
+	# API запросы напрямую в Gateway (для subscription endpoint)
+	@api path /api/v1/*
+	handle @api {
+		reverse_proxy {$GATEWAY_UPSTREAM} {
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
 	# Агрессивный long-term кэш для next-иммутабельной статики
 	# (хэши в именах → можно кэшировать "навсегда").
 	@next_static path /_next/static/*

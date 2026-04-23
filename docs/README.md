@@ -20,5 +20,6 @@
 
 ## Навигация
 
+- [Subscription Endpoint](./SUBSCRIPTION.md) - Подписка для VPN клиентов
 - [Спецификации](./specs/README.md)
 - [Сервисы](./services/README.md)

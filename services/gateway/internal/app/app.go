@@ -131,6 +131,7 @@ func (a *App) Start() error {
 	subscriptionHandler := handler.NewSubscriptionHandler(a.subscriptionClient, a.logger)
 	vpnHandler := handler.NewVPNHandler(a.vpnClient, a.logger)
 	paymentHandler := handler.NewPaymentHandler(a.paymentClient, a.config.Telegram.WebhookSecret, a.logger)
+	subscriptionConfigHandler := handler.NewSubscriptionConfigHandler(a.vpnClient, a.logger)
 
 	// JWT middleware для защищённых ручек. Секрет — общий с Auth Service.
 	jwtMiddleware := authmw.JWTMiddleware(a.config.JWT.Secret)
@@ -149,6 +150,8 @@ func (a *App) Start() error {
 		// Прайс-лист доступен и до логина (приветственный экран Mini App).
 		r.Get("/subscriptions/plans", subscriptionHandler.ListPlans)
 		r.Get("/subscriptions/plans/{planId}/pricing", subscriptionHandler.GetDevicePricing)
+		// Subscription config для VPN клиентов (Happ, V2RayNG, etc.)
+		r.Get("/subscription/{token}", subscriptionConfigHandler.SubscriptionConfig)
 		// Telegram webhook — публичный, но защищён shared-секретом
 		// в заголовке X-Telegram-Bot-Api-Secret-Token (проверяется в handler'е).
 		r.Post("/telegram/webhook", paymentHandler.TelegramWebhook)

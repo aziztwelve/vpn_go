@@ -392,6 +392,7 @@ tasks:
     deps: [env:generate]
     cmds:
       - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} --profile prod build --no-cache vpn-next
+      - docker builder prune -f
 
   next:up:
     desc: Start only vpn-next container
