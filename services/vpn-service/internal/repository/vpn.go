@@ -201,13 +201,14 @@ func (r *VPNRepository) ListAllVPNUsers(ctx context.Context) ([]*model.VPNUser, 
 
 // GetSubscriptionMaxDevices возвращает max_devices активной подписки vpn-юзера.
 // Кросс-сервисный JOIN — читаем из таблицы subscription-service (та же БД,
-// public schema). Если подписка не активна — возвращаем (0, ErrNoActiveSub).
+// public schema). Триал считается активной подпиской (status='trial').
+// Если подписка не активна / истекла — возвращаем (0, pgx.ErrNoRows).
 func (r *VPNRepository) GetSubscriptionMaxDevices(ctx context.Context, vpnUserID int64) (int32, error) {
 	query := `
 		SELECT s.max_devices
 		FROM vpn_users vu
 		JOIN subscriptions s ON s.id = vu.subscription_id
-		WHERE vu.id = $1 AND s.status = 'active' AND s.expires_at > NOW()
+		WHERE vu.id = $1 AND s.status IN ('active', 'trial') AND s.expires_at > NOW()
 	`
 	var maxDevices int32
 	err := r.db.QueryRow(ctx, query, vpnUserID).Scan(&maxDevices)
