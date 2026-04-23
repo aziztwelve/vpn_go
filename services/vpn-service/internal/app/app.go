@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/vpn/platform/pkg/closer"
@@ -24,6 +25,8 @@ type App struct {
 	logger     *zap.Logger
 	db         *pgxpool.Pool
 	xray       *xray.Client
+	repo       *repository.VPNRepository
+	svc        *service.VPNService
 	heartbeat  *service.Heartbeat
 	loadCron   *service.LoadCron
 	grpcServer *grpc.Server
@@ -145,11 +148,11 @@ func (a *App) initDB() error {
 }
 
 func (a *App) initGRPC() error {
-	repo := repository.NewVPNRepository(a.db)
-	svc := service.NewVPNService(repo, a.xray, a.logger)
-	vpnAPI := api.NewVPNAPI(svc, a.logger)
-	a.heartbeat = service.NewHeartbeat(repo, a.xray, a.logger)
-	a.loadCron = service.NewLoadCron(repo, a.logger)
+	a.repo = repository.NewVPNRepository(a.db)
+	a.svc = service.NewVPNService(a.repo, a.xray, a.logger)
+	vpnAPI := api.NewVPNAPI(a.svc, a.logger)
+	a.heartbeat = service.NewHeartbeat(a.repo, a.xray, a.logger)
+	a.loadCron = service.NewLoadCron(a.repo, a.logger)
 
 	a.grpcServer = grpc.NewServer()
 	pb.RegisterVPNServiceServer(a.grpcServer, vpnAPI)
@@ -195,7 +198,49 @@ func (a *App) Start() error {
 	})
 	go a.loadCron.Run(loadCtx)
 
+	// Resync-on-startup: Xray держит user list in-memory, после рестарта
+	// контейнера список пустой. Прогоняем ResyncServer по всем активным
+	// серверам — они получают обратно всех UUID из Postgres.
+	// Делаем в фоне, чтобы gRPC-сервер успел подняться (здоровье важнее
+	// чем полный resync); ошибки не роняют сервис — можно дёрнуть ручкой.
+	go a.resyncAllServersOnStartup()
+
 	return nil
+}
+
+func (a *App) resyncAllServersOnStartup() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	servers, err := a.repo.ListServers(ctx, true)
+	if err != nil {
+		a.logger.Warn("startup resync: failed to list active servers", zap.Error(err))
+		return
+	}
+	if len(servers) == 0 {
+		a.logger.Info("startup resync: no active servers, skipping")
+		return
+	}
+
+	a.logger.Info("startup resync: starting", zap.Int("servers", len(servers)))
+	for _, srv := range servers {
+		res, err := a.svc.ResyncServer(ctx, srv.ID)
+		if err != nil {
+			a.logger.Warn("startup resync: server failed",
+				zap.Int32("server_id", srv.ID),
+				zap.String("name", srv.Name),
+				zap.Error(err))
+			continue
+		}
+		a.logger.Info("startup resync: server done",
+			zap.Int32("server_id", srv.ID),
+			zap.String("name", srv.Name),
+			zap.Int32("total", res.Total),
+			zap.Int32("added", res.Added),
+			zap.Int32("already", res.AlreadyExist),
+			zap.Int32("failed", res.Failed),
+		)
+	}
 }
 
 func (a *App) Stop(ctx context.Context) error {
