@@ -24,6 +24,7 @@ type App struct {
 	authClient         *client.AuthClient
 	subscriptionClient *client.SubscriptionClient
 	vpnClient          *client.VPNClient
+	paymentClient      *client.PaymentClient
 	closer             *closer.Closer
 }
 
@@ -81,10 +82,21 @@ func (a *App) initClients() error {
 		return a.vpnClient.Close()
 	})
 
+	// Payment client
+	paymentClient, err := client.NewPaymentClient(a.config.Services.PaymentAddr, a.logger)
+	if err != nil {
+		return fmt.Errorf("failed to create payment client: %w", err)
+	}
+	a.paymentClient = paymentClient
+	a.closer.Add(func(ctx context.Context) error {
+		return a.paymentClient.Close()
+	})
+
 	a.logger.Info("gRPC clients initialized",
 		zap.String("auth", a.config.Services.AuthAddr),
 		zap.String("subscription", a.config.Services.SubscriptionAddr),
 		zap.String("vpn", a.config.Services.VPNAddr),
+		zap.String("payment", a.config.Services.PaymentAddr),
 	)
 
 	return nil
@@ -118,6 +130,7 @@ func (a *App) Start() error {
 	authHandler := handler.NewAuthHandler(a.authClient, a.logger)
 	subscriptionHandler := handler.NewSubscriptionHandler(a.subscriptionClient, a.logger)
 	vpnHandler := handler.NewVPNHandler(a.vpnClient, a.logger)
+	paymentHandler := handler.NewPaymentHandler(a.paymentClient, a.config.Telegram.WebhookSecret, a.logger)
 
 	// JWT middleware для защищённых ручек. Секрет — общий с Auth Service.
 	jwtMiddleware := authmw.JWTMiddleware(a.config.JWT.Secret)
@@ -136,6 +149,9 @@ func (a *App) Start() error {
 		// Прайс-лист доступен и до логина (приветственный экран Mini App).
 		r.Get("/subscriptions/plans", subscriptionHandler.ListPlans)
 		r.Get("/subscriptions/plans/{planId}/pricing", subscriptionHandler.GetDevicePricing)
+		// Telegram webhook — публичный, но защищён shared-секретом
+		// в заголовке X-Telegram-Bot-Api-Secret-Token (проверяется в handler'е).
+		r.Post("/telegram/webhook", paymentHandler.TelegramWebhook)
 
 		// ───── Защищённые ручки (Authorization: Bearer <JWT>) ─────────
 		r.Group(func(r chi.Router) {
@@ -154,6 +170,10 @@ func (a *App) Start() error {
 			r.Get("/vpn/servers/{serverId}/link", vpnHandler.GetVLESSLink)
 			r.Get("/vpn/connections", vpnHandler.GetActiveConnections)
 			r.Delete("/vpn/devices/{connectionId}", vpnHandler.DisconnectDevice)
+
+			// Payments
+			r.Post("/payments", paymentHandler.CreateInvoice)
+			r.Get("/payments", paymentHandler.ListPayments)
 		})
 	})
 

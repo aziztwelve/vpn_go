@@ -3,23 +3,25 @@ package model
 import "time"
 
 type VPNServer struct {
-	ID          int32
-	Name        string
-	Location    string
-	CountryCode string
-	Host        string
-	Port        int32
-	PublicKey   string
-	PrivateKey  string
-	ShortID     string
-	Dest        string
-	ServerNames string
-	XrayAPIHost string
-	XrayAPIPort int32
-	InboundTag  string
-	IsActive    bool
-	LoadPercent int32
-	CreatedAt   time.Time
+	ID                   int32
+	Name                 string
+	Location             string
+	CountryCode          string
+	Host                 string
+	Port                 int32
+	PublicKey            string
+	PrivateKey           string
+	ShortID              string
+	Dest                 string
+	ServerNames          string
+	XrayAPIHost          string
+	XrayAPIPort          int32
+	InboundTag           string
+	IsActive             bool
+	LoadPercent          int32
+	ServerMaxConnections int32
+	Description          string
+	CreatedAt            time.Time
 }
 
 type VPNUser struct {

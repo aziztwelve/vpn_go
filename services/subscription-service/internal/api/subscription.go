@@ -56,6 +56,8 @@ func (a *SubscriptionAPI) GetDevicePricing(ctx context.Context, req *pb.GetDevic
 		pbPrices = append(pbPrices, &pb.DevicePrice{
 			MaxDevices: price.MaxDevices,
 			Price:      fmt.Sprintf("%.2f", price.Price),
+			PriceStars: price.PriceStars,
+			PlanName:   price.PlanName,
 		})
 	}
 
@@ -181,6 +183,7 @@ func modelPlanToProto(plan *model.SubscriptionPlan) *pb.SubscriptionPlan {
 		MaxDevices:   plan.MaxDevices,
 		BasePrice:    fmt.Sprintf("%.2f", plan.BasePrice),
 		IsActive:     plan.IsActive,
+		PriceStars:   plan.PriceStars,
 	}
 }
 

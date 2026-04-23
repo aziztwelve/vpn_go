@@ -25,6 +25,7 @@ type App struct {
 	db         *pgxpool.Pool
 	xray       *xray.Client
 	heartbeat  *service.Heartbeat
+	loadCron   *service.LoadCron
 	grpcServer *grpc.Server
 	closer     *closer.Closer
 }
@@ -148,6 +149,7 @@ func (a *App) initGRPC() error {
 	svc := service.NewVPNService(repo, a.xray, a.logger)
 	vpnAPI := api.NewVPNAPI(svc, a.logger)
 	a.heartbeat = service.NewHeartbeat(repo, a.xray, a.logger)
+	a.loadCron = service.NewLoadCron(repo, a.logger)
 
 	a.grpcServer = grpc.NewServer()
 	pb.RegisterVPNServiceServer(a.grpcServer, vpnAPI)
@@ -184,6 +186,14 @@ func (a *App) Start() error {
 		return nil
 	})
 	go a.heartbeat.Run(hbCtx)
+
+	// LoadCron: пересчёт vpn_servers.load_percent каждые 60с.
+	loadCtx, loadCancel := context.WithCancel(context.Background())
+	a.closer.Add(func(ctx context.Context) error {
+		loadCancel()
+		return nil
+	})
+	go a.loadCron.Run(loadCtx)
 
 	return nil
 }

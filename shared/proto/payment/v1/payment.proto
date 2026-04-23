@@ -1,0 +1,101 @@
+syntax = "proto3";
+
+package payment.v1;
+
+option go_package = "github.com/vpn/shared/pkg/proto/payment/v1";
+
+// Payment Service — Telegram Stars интеграция.
+//
+// Флоу:
+//   1. Клиент: POST /api/v1/payments → CreateInvoice
+//      → создаётся pending-запись + возвращается t.me/ссылка на инвойс
+//   2. Юзер платит в Mini App → Telegram шлёт webhook
+//   3. pre_checkout_query (answer ok, 10с таймаут) → successful_payment
+//      (идемпотентно: INSERT ... ON CONFLICT external_id DO NOTHING)
+//   4. На successful_payment: статус paid + CreateSubscription + CreateVPNUser
+//
+// Refund: Telegram поддерживает refund через Stars API (21 день).
+// refunded_payment → UPDATE status='refunded' + CancelSubscription + DisableVPNUser.
+service PaymentService {
+  // Создать инвойс для оплаты подписки.
+  rpc CreateInvoice(CreateInvoiceRequest) returns (CreateInvoiceResponse);
+
+  // Получить информацию о платеже.
+  rpc GetPayment(GetPaymentRequest) returns (GetPaymentResponse);
+
+  // История платежей юзера (для UI "Мои платежи").
+  rpc ListUserPayments(ListUserPaymentsRequest) returns (ListUserPaymentsResponse);
+
+  // Обработать update от Telegram Bot API (pre_checkout_query / successful_payment /
+  // refunded_payment). Вызывается из Gateway, который принимает webhook.
+  rpc HandleTelegramUpdate(HandleTelegramUpdateRequest) returns (HandleTelegramUpdateResponse);
+}
+
+// --- CreateInvoice ---
+
+message CreateInvoiceRequest {
+  int64 user_id = 1;
+  int32 plan_id = 2;
+  int32 max_devices = 3;
+}
+
+message CreateInvoiceResponse {
+  // ID записи в payments (pending).
+  int64 payment_id = 1;
+  // Telegram invoice link, которую Mini App открывает через Telegram.WebApp.openInvoice().
+  string invoice_link = 2;
+  // Сколько Stars стоит (для UI).
+  int32 amount_stars = 3;
+}
+
+// --- GetPayment ---
+
+message GetPaymentRequest {
+  int64 payment_id = 1;
+}
+
+message GetPaymentResponse {
+  Payment payment = 1;
+}
+
+// --- ListUserPayments ---
+
+message ListUserPaymentsRequest {
+  int64 user_id = 1;
+  int32 limit = 2;  // default 50, max 200
+  int32 offset = 3;
+}
+
+message ListUserPaymentsResponse {
+  repeated Payment payments = 1;
+}
+
+// --- Webhook ---
+
+message HandleTelegramUpdateRequest {
+  // Сырой JSON update от Telegram (Gateway просто пересылает).
+  bytes update_json = 1;
+}
+
+message HandleTelegramUpdateResponse {
+  bool handled = 1;
+  string action = 2;  // для дебага: "pre_checkout", "paid", "refunded", "ignored"
+}
+
+// --- Types ---
+
+message Payment {
+  int64 id = 1;
+  int64 user_id = 2;
+  int32 plan_id = 3;
+  int32 max_devices = 4;
+  int32 amount_stars = 5;
+  // pending / paid / failed / refunded
+  string status = 6;
+  // telegram_payment_charge_id для paid; пустой для pending/failed
+  string external_id = 7;
+  // telegram_stars (всегда для MVP)
+  string provider = 8;
+  string created_at = 9;
+  string paid_at = 10;  // может быть пустым
+}

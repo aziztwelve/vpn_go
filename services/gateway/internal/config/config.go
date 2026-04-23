@@ -10,12 +10,19 @@ type Config struct {
 	HTTP     HTTPConfig
 	Services ServicesConfig
 	JWT      JWTConfig
+	Telegram TelegramConfig
 	Log      LogConfig
 }
 
 // JWTConfig — секрет общий с Auth Service (тот же HMAC-ключ).
 type JWTConfig struct {
 	Secret string
+}
+
+// TelegramConfig — shared-секрет для валидации webhook'а от Telegram.
+// Должен совпадать с тем что передаётся в setWebhook `secret_token`.
+type TelegramConfig struct {
+	WebhookSecret string
 }
 
 type HTTPConfig struct {
@@ -27,6 +34,7 @@ type ServicesConfig struct {
 	AuthAddr         string
 	SubscriptionAddr string
 	VPNAddr          string
+	PaymentAddr      string
 }
 
 type LogConfig struct {
@@ -48,9 +56,13 @@ func New() (*Config, error) {
 			AuthAddr:         getEnv("AUTH_SERVICE_ADDR", "localhost:50060"),
 			SubscriptionAddr: getEnv("SUBSCRIPTION_SERVICE_ADDR", "localhost:50061"),
 			VPNAddr:          getEnv("VPN_SERVICE_ADDR", "localhost:50062"),
+			PaymentAddr:      getEnv("PAYMENT_SERVICE_ADDR", "localhost:50063"),
 		},
 		JWT: JWTConfig{
 			Secret: getEnv("JWT_SECRET", ""),
+		},
+		Telegram: TelegramConfig{
+			WebhookSecret: getEnv("TELEGRAM_WEBHOOK_SECRET", ""),
 		},
 		Log: LogConfig{
 			Level: getEnv("LOG_LEVEL", "info"),

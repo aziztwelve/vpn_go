@@ -22,6 +22,35 @@ service VPNService {
   
   // Отключить устройство
   rpc DisconnectDevice(DisconnectDeviceRequest) returns (DisconnectDeviceResponse);
+
+  // Физически удалить VPN пользователя (RemoveUser во всех Xray inbound'ах + DELETE vpn_users).
+  // Вызывается payment-service при refund и subscription-service при истечении подписки.
+  rpc DisableVPNUser(DisableVPNUserRequest) returns (DisableVPNUserResponse);
+
+  // Пропушить ВСЕХ существующих vpn_users в inbound нового сервера.
+  // Вызывается после INSERT нового vpn_servers при масштабировании.
+  // Идемпотентно (already exists → skip).
+  rpc ResyncServer(ResyncServerRequest) returns (ResyncServerResponse);
+}
+
+message DisableVPNUserRequest {
+  int64 user_id = 1;
+}
+
+message DisableVPNUserResponse {
+  bool success = 1;
+  int32 servers_cleaned = 2;  // сколько xray inbound'ов обработано
+}
+
+message ResyncServerRequest {
+  int32 server_id = 1;
+}
+
+message ResyncServerResponse {
+  int32 users_total = 1;
+  int32 users_added = 2;       // успешно добавлено в inbound
+  int32 users_already = 3;     // уже были (idempotent)
+  int32 users_failed = 4;      // ошибки (не "already exists")
 }
 
 message CreateVPNUserRequest {

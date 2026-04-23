@@ -7,9 +7,14 @@ import (
 )
 
 type Config struct {
-	GRPC GRPCConfig
-	DB   DBConfig
-	Log  LogConfig
+	GRPC     GRPCConfig
+	DB       DBConfig
+	Services ServicesConfig
+	Log      LogConfig
+}
+
+type ServicesConfig struct {
+	VPNAddr string
 }
 
 type GRPCConfig struct {
@@ -51,6 +56,9 @@ func New() (*Config, error) {
 			User:     getEnv("DB_USER", "admin"),
 			Password: getEnv("DB_PASSWORD", ""),
 			Database: getEnv("DB_NAME", "vpn"),
+		},
+		Services: ServicesConfig{
+			VPNAddr: getEnv("VPN_SERVICE_ADDR", "localhost:50062"),
 		},
 		Log: LogConfig{
 			Level: getEnv("LOG_LEVEL", "info"),

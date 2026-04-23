@@ -6,6 +6,7 @@ use (
 	./platform
 	./services/auth-service
 	./services/gateway
+	./services/payment-service
 	./services/subscription-service
 	./services/vpn-service
 	./shared

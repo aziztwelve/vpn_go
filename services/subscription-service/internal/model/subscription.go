@@ -9,6 +9,7 @@ type SubscriptionPlan struct {
 	MaxDevices   int32
 	BasePrice    float64
 	IsActive     bool
+	PriceStars   int32
 }
 
 type DeviceAddonPricing struct {
@@ -16,6 +17,8 @@ type DeviceAddonPricing struct {
 	PlanID     int32
 	MaxDevices int32
 	Price      float64
+	PriceStars int32
+	PlanName   string // JOINed for convenience
 }
 
 type Subscription struct {

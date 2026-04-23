@@ -149,9 +149,17 @@ Telegram Mini App ─► POST /api/v1/payments/success  (на Этапе 5)
 
 ### 4. Смерть (подписка истекла / бан)
 ```
-Cron в VPN Service (по истечении подписки):
-  ① xray.RemoveUser(inbound_tag, email)   ─► Xray убрал из памяти
-  ② DELETE FROM vpn_users ...             ─► Postgres очистил
+Cron в Subscription Service (expire_cron.go, каждые 10 минут):
+  ① UPDATE subscriptions SET status='expired' WHERE expires_at < NOW()
+  ② для каждого юзера: gRPC vpn-service.DisableVPNUser(user_id)
+                        │
+                        ▼
+        VPN Service.DisableVPNUser:
+          ① для каждого active server: xray.RemoveUser(inbound_tag, email)
+               (идемпотентно — "not found" от Xray игнорируем)
+          ② DELETE FROM vpn_users ...  (CASCADE чистит active_connections)
+
+Аналогично на refund из Payment Service → тот же DisableVPNUser.
 
 Следующий handshake с этим UUID → Xray скажет "unknown user"
                                  → connection reset.
@@ -191,8 +199,8 @@ Xray рестартует (обновление, крэш) → теряет ВС
 - ✅ `CreateVPNUser` — сразу в Xray (Этап 2)
 - ✅ Трафик → `active_connections.last_seen` через Heartbeat каждые 60с (Этап 3)
 - ✅ Выдача VLESS-ссылки → UPSERT записи в `active_connections` + проверка `max_devices` (Этап 3)
-- ❌ Истечение подписки → физическое удаление из Xray — **TODO Этап 5**
-- ❌ Рестарт Xray → re-seed всех существующих юзеров — **TODO**
+- ✅ Истечение подписки / refund → `DisableVPNUser` (RemoveUser во всех серверах + DELETE vpn_users) — Этап 5 (expire_cron + refund webhook)
+- ❌ Рестарт Xray → re-seed всех существующих юзеров — **🔴 TODO** (см. `docs/tasks/02-mvp-c-implementation.md`, Cross-cutting TODOs)
 
 ---
 

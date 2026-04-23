@@ -39,7 +39,15 @@ func NewVPNService(repo *repository.VPNRepository, xrayClient *xray.Client, logg
 }
 
 // CreateVPNUser создаёт запись в БД и регистрирует юзера во ВСЕХ активных
-// Xray inbound'ах (пока у нас один локальный сервер, но код не предполагает 1).
+// Xray inbound'ах.
+//
+// Multi-server стратегия: **best-effort partial success**.
+//   - Если хоть один сервер принял AddUser → успех. Юзер может пользоваться
+//     VPN через этот сервер, а упавшие серверы восстановятся при следующем
+//     рестарте/resync.
+//   - Если ВСЕ серверы упали → ошибка. Записываем в БД всё равно (для retry
+//     cron'а), но возвращаем ошибку клиенту.
+//   - "already exists" трактуем как success (идемпотентность retry).
 func (s *VPNService) CreateVPNUser(ctx context.Context, userID, subscriptionID int64) (*model.VPNUser, error) {
 	userUUID := uuid.New().String()
 	email := fmt.Sprintf("user%d@vpn.local", userID)
@@ -57,25 +65,28 @@ func (s *VPNService) CreateVPNUser(ctx context.Context, userID, subscriptionID i
 		return nil, fmt.Errorf("list active servers: %w", err)
 	}
 
+	var succeeded, failed int
 	for _, srv := range servers {
 		if err := s.xray.AddUser(ctx, srv.InboundTag, userUUID, email, flow); err != nil {
-			// Идемпотентность: если юзер уже есть — логируем и продолжаем.
 			if isAlreadyExists(err) {
-				s.logger.Warn("xray user already exists, continue",
+				s.logger.Warn("xray user already exists, treating as success",
 					zap.Int64("user_id", userID),
 					zap.Int32("server_id", srv.ID),
-					zap.String("inbound_tag", srv.InboundTag),
 				)
+				succeeded++
 				continue
 			}
-			s.logger.Error("failed to add user to xray",
+			failed++
+			// Не валим — продолжаем со следующим сервером.
+			s.logger.Error("xray AddUser failed — continuing with other servers",
 				zap.Int64("user_id", userID),
 				zap.Int32("server_id", srv.ID),
 				zap.String("inbound_tag", srv.InboundTag),
 				zap.Error(err),
 			)
-			return nil, fmt.Errorf("xray AddUser on server %d: %w", srv.ID, err)
+			continue
 		}
+		succeeded++
 		s.logger.Info("xray user added",
 			zap.Int64("user_id", userID),
 			zap.Int32("server_id", srv.ID),
@@ -83,12 +94,23 @@ func (s *VPNService) CreateVPNUser(ctx context.Context, userID, subscriptionID i
 		)
 	}
 
+	// Если не удалось зарегистрировать ни на одном сервере — ошибка.
+	if len(servers) > 0 && succeeded == 0 {
+		s.logger.Error("VPN user DB-created but not registered on any Xray server",
+			zap.Int64("user_id", userID),
+			zap.String("uuid", userUUID),
+			zap.Int("failed", failed),
+		)
+		return vpnUser, fmt.Errorf("failed to register on any of %d Xray servers", len(servers))
+	}
+
 	s.logger.Info("VPN user created",
 		zap.Int64("user_id", userID),
 		zap.String("uuid", userUUID),
-		zap.Int("servers_registered", len(servers)),
+		zap.Int("servers_total", len(servers)),
+		zap.Int("servers_ok", succeeded),
+		zap.Int("servers_failed", failed),
 	)
-
 	return vpnUser, nil
 }
 
@@ -217,10 +239,125 @@ func (s *VPNService) GetActiveConnections(ctx context.Context, userID int64) ([]
 // DisconnectDevice удаляет запись active_connection и (пока упрощённо) не
 // трогает Xray — запрет подключения по лимиту устройств реализуется через
 // атомарный счётчик, а не через физическое удаление VLESS-клиента. Полное
-// удаление юзера из Xray-inbound'а происходит на уровне отдельного метода
-// DeleteVPNUser (ниже).
+// удаление юзера из Xray-inbound'а происходит через DisableVPNUser (ниже).
 func (s *VPNService) DisconnectDevice(ctx context.Context, connectionID int64) error {
 	return s.repo.DisconnectDevice(ctx, connectionID)
+}
+
+// DisableVPNUser физически удаляет юзера из всех Xray inbound'ов и из БД.
+// Вызывается:
+//   - payment-service при refund
+//   - subscription-service при истечении подписки (cron)
+//
+// Идемпотентность: если юзера нет в БД — возвращаем (0, nil).
+// Ошибки Xray RemoveUser (в т.ч. "not found") игнорируются — считаем успехом.
+func (s *VPNService) DisableVPNUser(ctx context.Context, userID int64) (cleaned int32, err error) {
+	vpnUser, err := s.repo.GetVPNUserByUserID(ctx, userID)
+	if err != nil {
+		// Юзер не найден — идемпотентный ответ.
+		s.logger.Info("DisableVPNUser: no vpn_user found, nothing to do",
+			zap.Int64("user_id", userID))
+		return 0, nil
+	}
+
+	servers, err := s.repo.ListServers(ctx, true)
+	if err != nil {
+		return 0, fmt.Errorf("list servers: %w", err)
+	}
+
+	for _, srv := range servers {
+		if err := s.xray.RemoveUser(ctx, srv.InboundTag, vpnUser.Email); err != nil {
+			// "not found" — нормально (например при повторном вызове или при
+			// рестарте Xray с потерей in-memory clients). Логируем и идём дальше.
+			if isNotFound(err) {
+				s.logger.Info("xray RemoveUser: not found (ok)",
+					zap.Int64("user_id", userID),
+					zap.Int32("server_id", srv.ID),
+					zap.String("email", vpnUser.Email),
+				)
+				cleaned++
+				continue
+			}
+			s.logger.Error("xray RemoveUser failed",
+				zap.Int64("user_id", userID),
+				zap.Int32("server_id", srv.ID),
+				zap.Error(err))
+			// Не роняем — продолжаем со следующими серверами.
+			continue
+		}
+		cleaned++
+		s.logger.Info("xray user removed",
+			zap.Int64("user_id", userID),
+			zap.Int32("server_id", srv.ID))
+	}
+
+	if err := s.repo.DeleteVPNUser(ctx, userID); err != nil {
+		return cleaned, fmt.Errorf("delete vpn_user: %w", err)
+	}
+	s.logger.Info("VPN user disabled",
+		zap.Int64("user_id", userID),
+		zap.Int32("servers_cleaned", cleaned))
+	return cleaned, nil
+}
+
+// ResyncResult — статистика ре-пуша юзеров на новый сервер.
+type ResyncResult struct {
+	Total        int32
+	Added        int32
+	AlreadyExist int32
+	Failed       int32
+}
+
+// ResyncServer — пропушить всех существующих vpn_users в inbound указанного сервера.
+// Используется при горизонтальном масштабировании: добавили 3-й VPS → INSERT
+// в vpn_servers → ResyncServer(3) → все имеющиеся UUID прописаны в его inbound.
+//
+// Идемпотентно: "already exists" не ошибка, а expected для retry.
+func (s *VPNService) ResyncServer(ctx context.Context, serverID int32) (*ResyncResult, error) {
+	srv, err := s.repo.GetServer(ctx, serverID)
+	if err != nil {
+		return nil, fmt.Errorf("get server: %w", err)
+	}
+
+	users, err := s.repo.ListAllVPNUsers(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list vpn users: %w", err)
+	}
+
+	res := &ResyncResult{Total: int32(len(users))}
+	for _, u := range users {
+		if err := s.xray.AddUser(ctx, srv.InboundTag, u.UUID, u.Email, u.Flow); err != nil {
+			if isAlreadyExists(err) {
+				res.AlreadyExist++
+				continue
+			}
+			res.Failed++
+			s.logger.Error("resync: AddUser failed",
+				zap.Int32("server_id", serverID),
+				zap.Int64("vpn_user_id", u.ID),
+				zap.Error(err))
+			continue
+		}
+		res.Added++
+	}
+
+	s.logger.Info("ResyncServer done",
+		zap.Int32("server_id", serverID),
+		zap.Int32("total", res.Total),
+		zap.Int32("added", res.Added),
+		zap.Int32("already", res.AlreadyExist),
+		zap.Int32("failed", res.Failed),
+	)
+	return res, nil
+}
+
+// isNotFound — эвристика Xray: при RemoveUser на несуществующего юзера.
+func isNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "not found") || strings.Contains(msg, "does not exist")
 }
 
 // isAlreadyExists — эвристика: Xray возвращает grpc Internal/Unknown ошибки

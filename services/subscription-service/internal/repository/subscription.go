@@ -18,7 +18,7 @@ func NewSubscriptionRepository(db *pgxpool.Pool) *SubscriptionRepository {
 
 // Plans
 func (r *SubscriptionRepository) ListPlans(ctx context.Context, activeOnly bool) ([]*model.SubscriptionPlan, error) {
-	query := `SELECT id, name, duration_days, max_devices, base_price, is_active FROM subscription_plans`
+	query := `SELECT id, name, duration_days, max_devices, base_price, is_active, price_stars FROM subscription_plans`
 	if activeOnly {
 		query += ` WHERE is_active = true`
 	}
@@ -33,7 +33,8 @@ func (r *SubscriptionRepository) ListPlans(ctx context.Context, activeOnly bool)
 	var plans []*model.SubscriptionPlan
 	for rows.Next() {
 		plan := &model.SubscriptionPlan{}
-		if err := rows.Scan(&plan.ID, &plan.Name, &plan.DurationDays, &plan.MaxDevices, &plan.BasePrice, &plan.IsActive); err != nil {
+		if err := rows.Scan(&plan.ID, &plan.Name, &plan.DurationDays, &plan.MaxDevices,
+			&plan.BasePrice, &plan.IsActive, &plan.PriceStars); err != nil {
 			return nil, err
 		}
 		plans = append(plans, plan)
@@ -43,7 +44,13 @@ func (r *SubscriptionRepository) ListPlans(ctx context.Context, activeOnly bool)
 }
 
 func (r *SubscriptionRepository) GetDevicePricing(ctx context.Context, planID int32) ([]*model.DeviceAddonPricing, error) {
-	query := `SELECT id, plan_id, max_devices, price FROM device_addon_pricing WHERE plan_id = $1 ORDER BY max_devices`
+	query := `
+		SELECT d.id, d.plan_id, d.max_devices, d.price, d.price_stars, p.name
+		FROM device_addon_pricing d
+		JOIN subscription_plans p ON p.id = d.plan_id
+		WHERE d.plan_id = $1
+		ORDER BY d.max_devices
+	`
 
 	rows, err := r.db.Query(ctx, query, planID)
 	if err != nil {
@@ -54,13 +61,40 @@ func (r *SubscriptionRepository) GetDevicePricing(ctx context.Context, planID in
 	var prices []*model.DeviceAddonPricing
 	for rows.Next() {
 		price := &model.DeviceAddonPricing{}
-		if err := rows.Scan(&price.ID, &price.PlanID, &price.MaxDevices, &price.Price); err != nil {
+		if err := rows.Scan(&price.ID, &price.PlanID, &price.MaxDevices, &price.Price,
+			&price.PriceStars, &price.PlanName); err != nil {
 			return nil, err
 		}
 		prices = append(prices, price)
 	}
 
 	return prices, nil
+}
+
+// ExpireOverdueSubscriptions помечает active-подписки с expires_at < NOW() как expired
+// и возвращает user_id'ы чтобы cron мог дёрнуть vpn-service.DisableVPNUser.
+func (r *SubscriptionRepository) ExpireOverdueSubscriptions(ctx context.Context) ([]int64, error) {
+	const q = `
+		UPDATE subscriptions
+		SET status = 'expired'
+		WHERE status = 'active' AND expires_at < NOW()
+		RETURNING user_id
+	`
+	rows, err := r.db.Query(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("expire overdue: %w", err)
+	}
+	defer rows.Close()
+
+	var userIDs []int64
+	for rows.Next() {
+		var uid int64
+		if err := rows.Scan(&uid); err != nil {
+			return nil, err
+		}
+		userIDs = append(userIDs, uid)
+	}
+	return userIDs, nil
 }
 
 // Subscriptions

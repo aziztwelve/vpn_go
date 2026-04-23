@@ -107,13 +107,16 @@ message SubscriptionPlan {
   string name = 2;
   int32 duration_days = 3;
   int32 max_devices = 4;
-  string base_price = 5; // Decimal as string
+  string base_price = 5;      // Decimal as string (RUB historical)
   bool is_active = 6;
+  int32 price_stars = 7;       // Telegram Stars (MVP)
 }
 
 message DevicePrice {
   int32 max_devices = 1;
-  string price = 2; // Decimal as string
+  string price = 2;            // Decimal as string (RUB)
+  int32 price_stars = 3;       // Telegram Stars (MVP)
+  string plan_name = 4;        // дубликат из plan для удобства client-side
 }
 
 message Subscription {

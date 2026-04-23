@@ -19,7 +19,9 @@ func NewVPNRepository(db *pgxpool.Pool) *VPNRepository {
 
 // Servers
 func (r *VPNRepository) ListServers(ctx context.Context, activeOnly bool) ([]*model.VPNServer, error) {
-	query := `SELECT id, name, location, country_code, host, port, public_key, short_id, dest, server_names, inbound_tag, is_active, load_percent, created_at FROM vpn_servers`
+	query := `SELECT id, name, location, country_code, host, port, public_key, short_id, dest,
+		server_names, inbound_tag, is_active, load_percent, server_max_connections, description, created_at
+		FROM vpn_servers`
 	if activeOnly {
 		query += ` WHERE is_active = true`
 	}
@@ -36,7 +38,8 @@ func (r *VPNRepository) ListServers(ctx context.Context, activeOnly bool) ([]*mo
 		server := &model.VPNServer{}
 		if err := rows.Scan(&server.ID, &server.Name, &server.Location, &server.CountryCode, &server.Host, &server.Port,
 			&server.PublicKey, &server.ShortID, &server.Dest, &server.ServerNames, &server.InboundTag,
-			&server.IsActive, &server.LoadPercent, &server.CreatedAt); err != nil {
+			&server.IsActive, &server.LoadPercent, &server.ServerMaxConnections, &server.Description,
+			&server.CreatedAt); err != nil {
 			return nil, err
 		}
 		servers = append(servers, server)
@@ -46,13 +49,16 @@ func (r *VPNRepository) ListServers(ctx context.Context, activeOnly bool) ([]*mo
 }
 
 func (r *VPNRepository) GetServer(ctx context.Context, serverID int32) (*model.VPNServer, error) {
-	query := `SELECT id, name, location, country_code, host, port, public_key, private_key, short_id, dest, server_names, xray_api_host, xray_api_port, inbound_tag, is_active, load_percent, created_at FROM vpn_servers WHERE id = $1`
+	query := `SELECT id, name, location, country_code, host, port, public_key, private_key, short_id, dest,
+		server_names, xray_api_host, xray_api_port, inbound_tag, is_active, load_percent,
+		server_max_connections, description, created_at FROM vpn_servers WHERE id = $1`
 
 	server := &model.VPNServer{}
 	err := r.db.QueryRow(ctx, query, serverID).Scan(
 		&server.ID, &server.Name, &server.Location, &server.CountryCode, &server.Host, &server.Port,
 		&server.PublicKey, &server.PrivateKey, &server.ShortID, &server.Dest, &server.ServerNames,
-		&server.XrayAPIHost, &server.XrayAPIPort, &server.InboundTag, &server.IsActive, &server.LoadPercent, &server.CreatedAt,
+		&server.XrayAPIHost, &server.XrayAPIPort, &server.InboundTag, &server.IsActive, &server.LoadPercent,
+		&server.ServerMaxConnections, &server.Description, &server.CreatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get server: %w", err)
@@ -63,6 +69,8 @@ func (r *VPNRepository) GetServer(ctx context.Context, serverID int32) (*model.V
 
 // UpsertServerByName — идемпотентный seed. Используется VPN Service при старте,
 // чтобы занести локальный Xray-сервер из env в БД (или обновить, если уже есть).
+// server_max_connections и description используют дефолты из БД при INSERT
+// и сохраняются при UPDATE (админ может поменять их через SQL).
 func (r *VPNRepository) UpsertServerByName(ctx context.Context, s *model.VPNServer) (*model.VPNServer, error) {
 	query := `
 		INSERT INTO vpn_servers (
@@ -88,18 +96,53 @@ func (r *VPNRepository) UpsertServerByName(ctx context.Context, s *model.VPNServ
 			xray_api_port = EXCLUDED.xray_api_port,
 			inbound_tag   = EXCLUDED.inbound_tag,
 			is_active     = EXCLUDED.is_active
-		RETURNING id, created_at
+		RETURNING id, server_max_connections, description, created_at
 	`
 
 	err := r.db.QueryRow(ctx, query,
 		s.Name, s.Location, s.CountryCode, s.Host, s.Port,
 		s.PublicKey, s.PrivateKey, s.ShortID, s.Dest, s.ServerNames,
 		s.XrayAPIHost, s.XrayAPIPort, s.InboundTag, s.IsActive,
-	).Scan(&s.ID, &s.CreatedAt)
+	).Scan(&s.ID, &s.ServerMaxConnections, &s.Description, &s.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("failed to upsert server: %w", err)
 	}
 	return s, nil
+}
+
+// UpdateServerLoad пересчитывает load_percent для одного сервера.
+// Формула: load_percent = COUNT(active_connections WHERE server_id AND last_seen > NOW()-5min) * 100 / server_max_connections
+func (r *VPNRepository) UpdateServerLoad(ctx context.Context, serverID int32) error {
+	const q = `
+		UPDATE vpn_servers vs
+		SET load_percent = LEAST(100, GREATEST(0, (
+			SELECT COALESCE(COUNT(*) * 100 / NULLIF(vs.server_max_connections, 0), 0)::int
+			FROM active_connections ac
+			WHERE ac.server_id = vs.id
+			  AND ac.last_seen > NOW() - INTERVAL '5 minutes'
+		)))
+		WHERE vs.id = $1
+	`
+	_, err := r.db.Exec(ctx, q, serverID)
+	return err
+}
+
+// ListServerIDs возвращает только id-шки — дёшево для cron-ного цикла.
+func (r *VPNRepository) ListActiveServerIDs(ctx context.Context) ([]int32, error) {
+	rows, err := r.db.Query(ctx, `SELECT id FROM vpn_servers WHERE is_active = true`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int32
+	for rows.Next() {
+		var id int32
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
 }
 
 // VPN Users
@@ -253,5 +296,13 @@ func (r *VPNRepository) GetActiveConnections(ctx context.Context, vpnUserID int6
 func (r *VPNRepository) DisconnectDevice(ctx context.Context, connectionID int64) error {
 	query := `DELETE FROM active_connections WHERE id = $1`
 	_, err := r.db.Exec(ctx, query, connectionID)
+	return err
+}
+
+// DeleteVPNUser удаляет запись vpn_users (ON DELETE CASCADE чистит
+// active_connections). Xray inbound-cleanup делается в сервисе ДО вызова
+// этого метода — тут только БД.
+func (r *VPNRepository) DeleteVPNUser(ctx context.Context, userID int64) error {
+	_, err := r.db.Exec(ctx, `DELETE FROM vpn_users WHERE user_id = $1`, userID)
 	return err
 }

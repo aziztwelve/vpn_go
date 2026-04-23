@@ -181,3 +181,32 @@ func (a *VPNAPI) DisconnectDevice(ctx context.Context, req *pb.DisconnectDeviceR
 
 	return &pb.DisconnectDeviceResponse{Success: true}, nil
 }
+
+func (a *VPNAPI) DisableVPNUser(ctx context.Context, req *pb.DisableVPNUserRequest) (*pb.DisableVPNUserResponse, error) {
+	if req.GetUserId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "user_id is required")
+	}
+	cleaned, err := a.service.DisableVPNUser(ctx, req.GetUserId())
+	if err != nil {
+		a.logger.Error("Failed to disable VPN user", zap.Int64("user_id", req.GetUserId()), zap.Error(err))
+		return nil, status.Error(codes.Internal, "failed to disable vpn user")
+	}
+	return &pb.DisableVPNUserResponse{Success: true, ServersCleaned: cleaned}, nil
+}
+
+func (a *VPNAPI) ResyncServer(ctx context.Context, req *pb.ResyncServerRequest) (*pb.ResyncServerResponse, error) {
+	if req.GetServerId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "server_id is required")
+	}
+	res, err := a.service.ResyncServer(ctx, req.GetServerId())
+	if err != nil {
+		a.logger.Error("ResyncServer failed", zap.Int32("server_id", req.GetServerId()), zap.Error(err))
+		return nil, status.Error(codes.Internal, "failed to resync server")
+	}
+	return &pb.ResyncServerResponse{
+		UsersTotal:   res.Total,
+		UsersAdded:   res.Added,
+		UsersAlready: res.AlreadyExist,
+		UsersFailed:  res.Failed,
+	}, nil
+}

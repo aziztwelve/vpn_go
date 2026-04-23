@@ -12,8 +12,10 @@ import (
 	"github.com/vpn/subscription-service/internal/repository"
 	"github.com/vpn/subscription-service/internal/service"
 	pb "github.com/vpn/shared/pkg/proto/subscription/v1"
+	vpnpb "github.com/vpn/shared/pkg/proto/vpn/v1"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 type App struct {
@@ -22,6 +24,8 @@ type App struct {
 	db         *pgxpool.Pool
 	grpcServer *grpc.Server
 	closer     *closer.Closer
+
+	expireCron *service.ExpireCron
 }
 
 func New(logger *zap.Logger) (*App, error) {
@@ -79,6 +83,16 @@ func (a *App) initGRPC() error {
 	svc := service.NewSubscriptionService(repo, a.logger)
 	subscriptionAPI := api.NewSubscriptionAPI(svc, a.logger)
 
+	// Клиент vpn-service — для expire-cron.
+	vpnConn, err := grpc.NewClient(a.config.Services.VPNAddr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return fmt.Errorf("dial vpn-service: %w", err)
+	}
+	a.closer.Add(func(ctx context.Context) error { return vpnConn.Close() })
+
+	a.expireCron = service.NewExpireCron(repo, vpnpb.NewVPNServiceClient(vpnConn), a.logger)
+
 	a.grpcServer = grpc.NewServer()
 	pb.RegisterSubscriptionServiceServer(a.grpcServer, subscriptionAPI)
 
@@ -104,6 +118,11 @@ func (a *App) Start() error {
 			a.logger.Fatal("gRPC server error", zap.Error(err))
 		}
 	}()
+
+	// Запускаем cron истечения подписок.
+	cronCtx, cancelCron := context.WithCancel(context.Background())
+	a.closer.Add(func(ctx context.Context) error { cancelCron(); return nil })
+	go a.expireCron.Run(cronCtx)
 
 	return nil
 }

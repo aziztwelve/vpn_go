@@ -40,6 +40,7 @@ func (h *SubscriptionHandler) ListPlans(w http.ResponseWriter, r *http.Request) 
 			"duration_days": plan.DurationDays,
 			"max_devices":   plan.MaxDevices,
 			"base_price":    plan.BasePrice,
+			"price_stars":   plan.PriceStars,
 			"is_active":     plan.IsActive,
 		})
 	}
@@ -68,6 +69,8 @@ func (h *SubscriptionHandler) GetDevicePricing(w http.ResponseWriter, r *http.Re
 		prices = append(prices, map[string]interface{}{
 			"max_devices": price.MaxDevices,
 			"price":       price.Price,
+			"price_stars": price.PriceStars,
+			"plan_name":   price.PlanName,
 		})
 	}
 
