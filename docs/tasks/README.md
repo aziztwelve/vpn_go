@@ -24,3 +24,4 @@
 - [03-client-config-smart-routing.md](./03-client-config-smart-routing.md) — 🟡 Умный клиентский конфиг (split-tunnel RU → direct)
 - [04-caddy-auto-tls.md](./04-caddy-auto-tls.md) — 🟢 Публичный домен + авто-TLS через Caddy (заменяет 9.2/9.7)
 - [05-trial-period.md](./05-trial-period.md) — 🟢 Автоматический пробный период 3 дня новым юзерам
+- [06-traffic-caps.md](./06-traffic-caps.md) — 🟡 Лимиты трафика на тариф (против перепродажи без per-device UUID)
