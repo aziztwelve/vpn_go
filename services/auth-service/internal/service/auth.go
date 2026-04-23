@@ -105,17 +105,19 @@ func (s *AuthService) ValidateTelegramInitData(initData string) (map[string]stri
 	return dataMap, nil
 }
 
-// ValidateTelegramUser валидирует и создаёт/обновляет пользователя
-func (s *AuthService) ValidateTelegramUser(ctx context.Context, initData string) (*model.User, string, error) {
+// ValidateTelegramUser валидирует и создаёт/обновляет пользователя.
+// Возвращает (user, jwtToken, isNewUser, err). isNewUser=true — юзер только
+// что создан (Gateway использует этот флаг чтобы активировать trial).
+func (s *AuthService) ValidateTelegramUser(ctx context.Context, initData string) (*model.User, string, bool, error) {
 	dataMap, err := s.ValidateTelegramInitData(initData)
 	if err != nil {
-		return nil, "", fmt.Errorf("validation failed: %w", err)
+		return nil, "", false, fmt.Errorf("validation failed: %w", err)
 	}
 
 	// Парсим user из JSON
 	userJSON, ok := dataMap["user"]
 	if !ok {
-		return nil, "", fmt.Errorf("user not found in init data")
+		return nil, "", false, fmt.Errorf("user not found in init data")
 	}
 
 	// Простой парсинг JSON (можно использовать encoding/json для более сложных случаев)
@@ -165,17 +167,19 @@ func (s *AuthService) ValidateTelegramUser(ctx context.Context, initData string)
 	}
 
 	if telegramID == 0 {
-		return nil, "", fmt.Errorf("invalid telegram_id")
+		return nil, "", false, fmt.Errorf("invalid telegram_id")
 	}
 
 	// Проверяем существует ли пользователь
+	isNewUser := false
 	user, err := s.userRepo.GetUserByTelegramID(ctx, telegramID)
 	if err != nil {
 		// Пользователь не найден, создаём нового
 		user, err = s.userRepo.CreateUser(ctx, telegramID, username, firstName, lastName, photoURL, langCode)
 		if err != nil {
-			return nil, "", fmt.Errorf("failed to create user: %w", err)
+			return nil, "", false, fmt.Errorf("failed to create user: %w", err)
 		}
+		isNewUser = true
 		s.logger.Info("New user created", zap.Int64("telegram_id", telegramID))
 	} else {
 		// Обновляем данные пользователя
@@ -195,10 +199,10 @@ func (s *AuthService) ValidateTelegramUser(ctx context.Context, initData string)
 	// Генерируем JWT токен
 	token, err := s.GenerateJWT(user.ID, user.Role)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to generate JWT: %w", err)
+		return nil, "", false, fmt.Errorf("failed to generate JWT: %w", err)
 	}
 
-	return user, token, nil
+	return user, token, isNewUser, nil
 }
 
 // GenerateJWT генерирует JWT токен

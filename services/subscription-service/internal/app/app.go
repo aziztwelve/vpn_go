@@ -16,6 +16,7 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/reflection"
 )
 
 type App struct {
@@ -95,6 +96,7 @@ func (a *App) initGRPC() error {
 
 	a.grpcServer = grpc.NewServer()
 	pb.RegisterSubscriptionServiceServer(a.grpcServer, subscriptionAPI)
+	reflection.Register(a.grpcServer)
 
 	a.closer.Add(func(ctx context.Context) error {
 		a.grpcServer.GracefulStop()

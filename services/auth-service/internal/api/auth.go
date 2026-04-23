@@ -30,15 +30,16 @@ func (a *AuthAPI) ValidateTelegramUser(ctx context.Context, req *pb.ValidateTele
 		return nil, status.Error(codes.InvalidArgument, "init_data is required")
 	}
 
-	user, token, err := a.authService.ValidateTelegramUser(ctx, req.InitData)
+	user, token, isNewUser, err := a.authService.ValidateTelegramUser(ctx, req.InitData)
 	if err != nil {
 		a.logger.Error("Failed to validate telegram user", zap.Error(err))
 		return nil, status.Error(codes.Unauthenticated, "invalid init data")
 	}
 
 	return &pb.ValidateTelegramUserResponse{
-		User:     modelUserToProto(user),
-		JwtToken: token,
+		User:      modelUserToProto(user),
+		JwtToken:  token,
+		IsNewUser: isNewUser,
 	}, nil
 }
 

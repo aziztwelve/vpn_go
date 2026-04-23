@@ -65,3 +65,7 @@ func (c *SubscriptionClient) GetSubscriptionHistory(ctx context.Context, userID 
 		UserId: userID,
 	})
 }
+
+func (c *SubscriptionClient) StartTrial(ctx context.Context, userID int64) (*pb.StartTrialResponse, error) {
+	return c.client.StartTrial(ctx, &pb.StartTrialRequest{UserId: userID})
+}

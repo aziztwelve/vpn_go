@@ -93,3 +93,32 @@ func (s *SubscriptionService) CheckSubscriptionActive(ctx context.Context, userI
 func (s *SubscriptionService) GetSubscriptionHistory(ctx context.Context, userID int64) ([]*model.Subscription, error) {
 	return s.repo.GetSubscriptionHistory(ctx, userID)
 }
+
+// StartTrial активирует пробный период юзеру, если ещё не выдан.
+// Возвращает (sub, alreadyUsed, err). alreadyUsed=true — триал уже был выдан
+// этому телеграм-аккаунту (по users.trial_used_at), новой подписки не создаём.
+func (s *SubscriptionService) StartTrial(ctx context.Context, userID int64) (*model.Subscription, bool, error) {
+	trialPlan, err := s.repo.GetTrialPlan(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+
+	sub, alreadyUsed, err := s.repo.StartTrialTx(ctx, userID, trialPlan)
+	if err != nil {
+		return nil, false, err
+	}
+
+	if alreadyUsed {
+		s.logger.Info("StartTrial: already used",
+			zap.Int64("user_id", userID))
+		return nil, true, nil
+	}
+
+	s.logger.Info("Trial started",
+		zap.Int64("user_id", userID),
+		zap.Int64("subscription_id", sub.ID),
+		zap.Int32("duration_days", trialPlan.DurationDays),
+		zap.Time("expires_at", sub.ExpiresAt),
+	)
+	return sub, false, nil
+}

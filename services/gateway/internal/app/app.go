@@ -127,7 +127,7 @@ func (a *App) Start() error {
 	router.Get("/health", handler.HealthCheck)
 
 	// Handlers
-	authHandler := handler.NewAuthHandler(a.authClient, a.logger)
+	authHandler := handler.NewAuthHandler(a.authClient, a.subscriptionClient, a.vpnClient, a.logger)
 	subscriptionHandler := handler.NewSubscriptionHandler(a.subscriptionClient, a.logger)
 	vpnHandler := handler.NewVPNHandler(a.vpnClient, a.logger)
 	paymentHandler := handler.NewPaymentHandler(a.paymentClient, a.config.Telegram.WebhookSecret, a.logger)

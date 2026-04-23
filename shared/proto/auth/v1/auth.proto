@@ -28,6 +28,7 @@ message ValidateTelegramUserRequest {
 message ValidateTelegramUserResponse {
   User user = 1;
   string jwt_token = 2; // JWT для внутренней авторизации
+  bool is_new_user = 3; // true если юзер был создан только что (для trial-активации в Gateway)
 }
 
 message GetUserRequest {

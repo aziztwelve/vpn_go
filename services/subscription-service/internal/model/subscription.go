@@ -10,6 +10,7 @@ type SubscriptionPlan struct {
 	BasePrice    float64
 	IsActive     bool
 	PriceStars   int32
+	IsTrial      bool
 }
 
 type DeviceAddonPricing struct {
@@ -36,6 +37,7 @@ type Subscription struct {
 
 const (
 	StatusActive    = "active"
+	StatusTrial     = "trial"
 	StatusExpired   = "expired"
 	StatusCancelled = "cancelled"
 )

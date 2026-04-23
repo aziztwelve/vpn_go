@@ -175,6 +175,27 @@ func (a *SubscriptionAPI) GetSubscriptionHistory(ctx context.Context, req *pb.Ge
 	return &pb.GetSubscriptionHistoryResponse{Subscriptions: pbSubs}, nil
 }
 
+func (a *SubscriptionAPI) StartTrial(ctx context.Context, req *pb.StartTrialRequest) (*pb.StartTrialResponse, error) {
+	if req.UserId == 0 {
+		return nil, status.Error(codes.InvalidArgument, "user_id is required")
+	}
+
+	sub, alreadyUsed, err := a.service.StartTrial(ctx, req.UserId)
+	if err != nil {
+		a.logger.Error("Failed to start trial", zap.Int64("user_id", req.UserId), zap.Error(err))
+		return nil, status.Error(codes.Internal, "failed to start trial")
+	}
+
+	if alreadyUsed {
+		return &pb.StartTrialResponse{WasAlreadyUsed: true}, nil
+	}
+
+	return &pb.StartTrialResponse{
+		Subscription:   modelSubscriptionToProto(sub),
+		WasAlreadyUsed: false,
+	}, nil
+}
+
 func modelPlanToProto(plan *model.SubscriptionPlan) *pb.SubscriptionPlan {
 	return &pb.SubscriptionPlan{
 		Id:           plan.ID,
@@ -184,6 +205,7 @@ func modelPlanToProto(plan *model.SubscriptionPlan) *pb.SubscriptionPlan {
 		BasePrice:    fmt.Sprintf("%.2f", plan.BasePrice),
 		IsActive:     plan.IsActive,
 		PriceStars:   plan.PriceStars,
+		IsTrial:      plan.IsTrial,
 	}
 }
 

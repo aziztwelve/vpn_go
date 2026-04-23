@@ -28,6 +28,11 @@ service SubscriptionService {
   
   // Получить историю подписок пользователя
   rpc GetSubscriptionHistory(GetSubscriptionHistoryRequest) returns (GetSubscriptionHistoryResponse);
+
+  // Активировать пробный период (is_trial=true plan) для нового юзера.
+  // Идемпотентно — если users.trial_used_at уже стоит, возвращает was_already_used=true
+  // без создания дубликата.
+  rpc StartTrial(StartTrialRequest) returns (StartTrialResponse);
 }
 
 message ListPlansRequest {
@@ -102,6 +107,15 @@ message GetSubscriptionHistoryResponse {
   repeated Subscription subscriptions = 1;
 }
 
+message StartTrialRequest {
+  int64 user_id = 1;
+}
+
+message StartTrialResponse {
+  Subscription subscription = 1;
+  bool was_already_used = 2; // true → юзер уже использовал триал, новая подписка не создана
+}
+
 message SubscriptionPlan {
   int32 id = 1;
   string name = 2;
@@ -110,6 +124,7 @@ message SubscriptionPlan {
   string base_price = 5;      // Decimal as string (RUB historical)
   bool is_active = 6;
   int32 price_stars = 7;       // Telegram Stars (MVP)
+  bool is_trial = 8;           // Plan выдаётся через StartTrial, не показывается в списке для продажи
 }
 
 message DevicePrice {
