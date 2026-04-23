@@ -367,19 +367,23 @@ tasks:
 
   domain:swap:
     desc: 'Swap API domain in .env. Usage: task domain:swap NEW=api.example.com'
+    preconditions:
+      - sh: '[ -n "{{.NEW}}" ]'
+        msg: "Usage: task domain:swap NEW=api.example.com"
     cmds:
-      - test -n "{{.NEW}}" || (echo "❌ Usage: task domain:swap NEW=api.example.com" && exit 1)
       - sed -i.bak "s/^API_DOMAIN=.*/API_DOMAIN={{.NEW}}/" {{.MASTER_ENV}}
       - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} --profile prod up -d caddy
-      - echo "✅ API domain swapped to {{.NEW}}. Caddy will issue cert on first request (needs A-record → VPS IP)."
+      - echo "API domain swapped to {{.NEW}}. Caddy will issue cert on first request (needs A-record → VPS IP)."
 
   domain:swap-cdn:
-    desc: 'Swap CDN (Mini App) domain in .env. Usage: task domain:swap-cdn NEW=app.example.com'
+    desc: 'Swap CDN (Mini App) domain in .env. Usage: task domain:swap-cdn NEW=cdn.example.com'
+    preconditions:
+      - sh: '[ -n "{{.NEW}}" ]'
+        msg: "Usage: task domain:swap-cdn NEW=cdn.example.com"
     cmds:
-      - test -n "{{.NEW}}" || (echo "❌ Usage: task domain:swap-cdn NEW=cdn.example.com" && exit 1)
       - sed -i.bak "s/^CDN_DOMAIN=.*/CDN_DOMAIN={{.NEW}}/" {{.MASTER_ENV}}
       - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} --profile prod up -d caddy
-      - echo "✅ CDN domain swapped to {{.NEW}}. Don't forget to update @BotFather Mini App URL."
+      - echo "CDN domain swapped to {{.NEW}}. Don't forget to update @BotFather Mini App URL."
 
   # ==================== NEXT (Telegram Mini App, vpn_next) ====================
 

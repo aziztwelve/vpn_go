@@ -23,6 +23,9 @@ go.work.sum
 *.env
 !*.env.template
 
+# Backup files (from sed -i.bak, etc.)
+*.bak
+
 # Generated Xray config (from config.json.template)
 deploy/compose/xray/config.json
 

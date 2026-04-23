@@ -18,7 +18,6 @@
 	# После успешной проверки (curl -k https://api.osmonai.com/health → 200):
 	#   task caddy:go-prod        # закомментирует строку ниже + сотрёт volume
 	#
-	acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
 }
 
 {$API_DOMAIN} {
