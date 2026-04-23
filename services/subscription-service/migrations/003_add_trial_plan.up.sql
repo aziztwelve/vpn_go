@@ -4,10 +4,10 @@
 ALTER TABLE subscription_plans
     ADD COLUMN IF NOT EXISTS is_trial BOOLEAN NOT NULL DEFAULT false;
 
--- Seed: триал-план (3 дня, 1 устройство, price=0, отдельный id=99 чтобы
+-- Seed: триал-план (3 дня, 2 устройства, price=0, отдельный id=99 чтобы
 -- не мешать нумерации обычных планов 1-4).
 INSERT INTO subscription_plans (id, name, duration_days, max_devices, base_price, price_stars, is_active, is_trial)
-VALUES (99, 'Пробный период', 3, 1, 0.00, 0, true, true)
+VALUES (99, 'Пробный период', 3, 2, 0.00, 0, true, true)
 ON CONFLICT (id) DO NOTHING;
 
 -- Статус 'trial' добавляется в check-constraint subscriptions.status только

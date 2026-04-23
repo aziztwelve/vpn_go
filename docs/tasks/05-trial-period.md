@@ -10,7 +10,7 @@
 ## 🎯 Цель
 
 Новый пользователь, впервые открывший Mini App через Telegram, **автоматически и без оплаты** получает:
-- Подписку со статусом `trial`, длительностью **3 дня**, на **1 устройство**
+- Подписку со статусом `trial`, длительностью **3 дня**, на **2 устройства**
 - Работающий VPN-доступ (UUID прописан во всех активных Xray inbound'ах)
 - Понятное уведомление во фронте: «вам активирован пробный период на 3 дня»
 
@@ -75,9 +75,9 @@ FROM users u LEFT JOIN subscriptions s ON s.user_id=u.id;
 -- покупаемые, но используются для StartTrial.
 ALTER TABLE subscription_plans ADD COLUMN is_trial BOOLEAN NOT NULL DEFAULT false;
 
--- Trial-plan (1 устройство, 3 дня, цена 0 — не для продажи)
+-- Trial-plan (2 устройства, 3 дня, цена 0 — не для продажи)
 INSERT INTO subscription_plans (id, name, duration_days, max_devices, base_price, price_stars, is_active, is_trial)
-VALUES (99, 'Пробный период', 3, 1, 0.00, 0, true, true);
+VALUES (99, 'Пробный период', 3, 2, 0.00, 0, true, true);
 
 -- Service-level идемпотентность: помечаем в users что триал был выдан.
 -- Позволяет переиспользовать тот же telegram_id (например после delete user)
@@ -198,7 +198,7 @@ json.NewEncoder(w).Encode(AuthResponse{
 ## ✅ Definition of Done
 
 - [ ] Миграция `003_add_trial_support.up.sql` написана, `down.sql` корректно откатывает
-- [ ] Триал-план (id=99, name="Пробный период", 3 дня, 1 устройство, is_trial=true) создаётся
+- [ ] Триал-план (id=99, name="Пробный период", 3 дня, 2 устройства, is_trial=true) создаётся
 - [ ] `subscription-service.StartTrial` RPC: транзакция (SELECT…FOR UPDATE + INSERT + UPDATE), повторный вызов возвращает `was_already_used=true` без создания дубликата
 - [ ] `auth-service.ValidateTelegramUser` возвращает `is_new_user`
 - [ ] Gateway `/api/v1/auth/validate`: при `is_new_user=true` вызывает StartTrial + CreateVPNUser, отдаёт `trial_activated` + `subscription` в ответе
@@ -238,12 +238,12 @@ json.NewEncoder(w).Encode(AuthResponse{
    - Одна строка в `subscriptions` на юзера, обновляется in-place: меняется `plan_id`, `status` (trial → active), `max_devices`, `expires_at`, `total_price`
    - **Итог:** юзер, купивший план на 3-й день триала, получит **3 дня остатка + 30 дней** = 33 дня. Воспринимается как бонус, а не штраф за "раннюю покупку".
 
-4. **`max_devices=1` у триала.** Конверсионный драйвер — юзеру нужно купить подписку чтобы подключить второе устройство (телефон+ноут, или два члена семьи).
+4. **`max_devices=2` у триала (пересмотрено).** Изначально было 1, но это создавало трение ещё до первой оплаты: у нового юзера почти всегда есть пара устройств (телефон+ноут). Конверсионный драйвер переносим на длительность (3 дня) и количество локаций. Изменение пришло миграцией `004_trial_two_devices.up.sql`.
 
 5. **One-time backfill для существующих юзеров.** SQL-скрипт `deploy/scripts/backfill-trial.sql` — выдаёт триал всем `users.trial_used_at IS NULL`. Выполняется вручную один раз на prod-БД после миграции.
 
 6. **`/auth/validate` НЕ возвращает `vless_link`.** Ответ включает только `{user, token, trial_activated, subscription}`. Линк получается отдельным `GET /api/v1/vpn/servers/{id}/link?device_id=...` когда юзер выбрал сервер в UI. Причины:
-    - `GetVLESSLink` имеет побочный эффект — `UPSERT active_connections` (занимает слот устройства). Фейковый `initial` device_id в `/auth/validate` создал бы мёртвый слот и моментальный `device_limit` на триале с `max_devices=1`.
+    - `GetVLESSLink` имеет побочный эффект — `UPSERT active_connections` (занимает слот устройства). Фейковый `initial` device_id в `/auth/validate` создал бы мёртвый слот и быстро упёр бы юзера в `device_limit` (на триале с `max_devices=2` второй слот тратится за один клик).
     - `device_id` — это localStorage UUID клиента, сервер его не знает до первого явного запроса.
     - Multi-server архитектура: дефолтный сервер в `/auth/validate` навязывал бы скрытую логику (по load? по geo?) в неожиданное место.
     - Семантика чище: auth — "кто ты", vpn — "подключение".
