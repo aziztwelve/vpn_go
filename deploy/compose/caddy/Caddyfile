@@ -1,0 +1,81 @@
+# ============================================================
+# Caddy — public HTTPS reverse proxy для Gateway
+# ============================================================
+# Auto-TLS (Let's Encrypt HTTP-01). Переменные {$VAR} подставляет
+# сам Caddy из env-а контейнера (см. docker-compose.yml → environment).
+#
+# Смена домена = правка API_DOMAIN в .env + `task domain:swap` или
+# `docker compose up -d caddy`. Новый серт выпускается автоматически
+# при первом запросе (A-запись должна уже указывать на VPS).
+# ============================================================
+{
+	email {$ACME_EMAIL}
+
+	# --- STAGING (по умолчанию на первых запусках) ---
+	# Let's Encrypt staging-CA — выдаёт невалидные серты, но без
+	# rate-limit (5 prod-certs/week/domain). Процесс идентичен prod.
+	#
+	# После успешной проверки (curl -k https://api.osmonai.com/health → 200):
+	#   task caddy:go-prod        # закомментирует строку ниже + сотрёт volume
+	#
+	acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+{$API_DOMAIN} {
+	encode gzip zstd
+
+	# Health-check путь — отдельно для внешнего мониторинга (UptimeRobot и т.п.).
+	@health path /health /api/v1/healthz
+	handle @health {
+		reverse_proxy {$GATEWAY_UPSTREAM}
+	}
+
+	# Всё остальное — в Gateway (HTTP:8081 внутри compose-сети).
+	# X-Forwarded-For/Proto Caddy проставляет сам по умолчанию.
+	reverse_proxy {$GATEWAY_UPSTREAM} {
+		header_up X-Real-IP {remote_host}
+	}
+
+	# Security headers
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}
+
+# ============================================================
+# cdn.osmonai.com — Telegram Mini App (vpn_next, Next.js 16 standalone)
+# ============================================================
+# Проксирует весь трафик в node-сервер vpn-next:3000 (compose-сеть).
+# На /api/proxy/* Next.js сам форвардит в gateway (GATEWAY_URL env).
+{$CDN_DOMAIN} {
+	encode gzip zstd
+
+	# Агрессивный long-term кэш для next-иммутабельной статики
+	# (хэши в именах → можно кэшировать "навсегда").
+	@next_static path /_next/static/*
+	header @next_static Cache-Control "public, max-age=31536000, immutable"
+
+	reverse_proxy {$NEXT_UPSTREAM} {
+		header_up X-Real-IP {remote_host}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

@@ -1,0 +1,24 @@
+# ============================================================
+# Dev-only override: публикует gateway на хост-порт 8081.
+# ============================================================
+# В базовом docker-compose.yml gateway использует `expose:` (не `ports:`)
+# — это нужно для прод-деплоя, где наружу торчит только caddy:443.
+# Локально (без caddy) нам нужен прямой доступ gateway → localhost:8081.
+#
+# Usage (из vpn_go/):
+#   docker compose \
+#     -f deploy/compose/docker-compose.yml \
+#     -f deploy/compose/docker-compose.dev.yml \
+#     up -d
+#
+# Или через Taskfile:
+#   task compose:up        # dev (этот override + без --profile prod)
+#   task compose:up-prod   # prod (без этого override + --profile prod → caddy)
+# ============================================================
+
+name: vpn-stack
+
+services:
+  gateway:
+    ports:
+      - "${GATEWAY_HTTP_PORT}:${GATEWAY_HTTP_PORT}"

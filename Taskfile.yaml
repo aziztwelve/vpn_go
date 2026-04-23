@@ -6,11 +6,12 @@ vars:
   PROTO_DIR: ./shared/proto
   PROTO_OUT_DIR: ./shared/pkg/proto
   COMPOSE_FILE: ./deploy/compose/docker-compose.yml
+  COMPOSE_DEV_FILE: ./deploy/compose/docker-compose.dev.yml
   ENV_DIR: ./deploy/env
   MASTER_ENV: ./deploy/env/.env
   ENVSUBST_VERSION: 'v1.4.3'
   ENVSUBST: ./bin/envsubst
-  SERVICES: 'auth,sub,vpn,gateway'
+  SERVICES: 'auth,sub,vpn,payment,gateway'
 
 tasks:
   # ==================== ENV MANAGEMENT ====================
@@ -69,6 +70,14 @@ tasks:
     cmds:
       - go run cmd/main/main.go
 
+  dev:payment:
+    desc: Run payment-service locally (reads deploy/env/payment.env)
+    deps: [env:generate]
+    dir: "{{.SERVICES_DIR}}/payment-service"
+    dotenv: ['../../deploy/env/payment.env']
+    cmds:
+      - go run cmd/main/main.go
+
   dev:gateway:
     desc: Run gateway locally (reads deploy/env/gateway.env)
     deps: [env:generate]
@@ -97,6 +106,12 @@ tasks:
     cmds:
       - go build -o ../../{{.BIN_DIR}}/vpn-service cmd/main/main.go
 
+  build:payment:
+    desc: Build payment-service binary
+    dir: "{{.SERVICES_DIR}}/payment-service"
+    cmds:
+      - go build -o ../../{{.BIN_DIR}}/payment-service cmd/main/main.go
+
   build:gateway:
     desc: Build gateway binary
     dir: "{{.SERVICES_DIR}}/gateway"
@@ -109,6 +124,7 @@ tasks:
       - task: build:auth
       - task: build:sub
       - task: build:vpn
+      - task: build:payment
       - task: build:gateway
 
   # ==================== RUN FROM BINARY ====================
@@ -187,35 +203,41 @@ tasks:
   # ==================== COMPOSE ====================
 
   compose:up:
-    desc: Start full dev stack (postgres + migrate + 4 services)
+    desc: "Start full dev stack (dev override: gateway published on :8081, no caddy)"
     deps: [env:generate]
     cmds:
-      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} up -d --build
+      - docker compose -f {{.COMPOSE_FILE}} -f {{.COMPOSE_DEV_FILE}} --env-file {{.MASTER_ENV}} up -d --build
+
+  compose:up-prod:
+    desc: "Start prod stack (gateway only via caddy:443 — profile=prod)"
+    deps: [env:generate]
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} --profile prod up -d --build
 
   compose:down:
-    desc: Stop full dev stack
+    desc: Stop full stack (works for both dev and prod)
     cmds:
-      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} down
+      - docker compose -f {{.COMPOSE_FILE}} -f {{.COMPOSE_DEV_FILE}} --env-file {{.MASTER_ENV}} --profile prod down
 
   compose:down-v:
     desc: Stop stack AND remove postgres volume (wipes DB)
     cmds:
-      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} down -v
+      - docker compose -f {{.COMPOSE_FILE}} -f {{.COMPOSE_DEV_FILE}} --env-file {{.MASTER_ENV}} --profile prod down -v
 
   compose:logs:
     desc: Tail logs of the full stack
     cmds:
-      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} logs -f
+      - docker compose -f {{.COMPOSE_FILE}} -f {{.COMPOSE_DEV_FILE}} --env-file {{.MASTER_ENV}} --profile prod logs -f
 
   compose:ps:
     desc: Show status of the stack
     cmds:
-      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} ps
+      - docker compose -f {{.COMPOSE_FILE}} -f {{.COMPOSE_DEV_FILE}} --env-file {{.MASTER_ENV}} --profile prod ps
 
   compose:rebuild:
     desc: Rebuild all service images from scratch
     cmds:
-      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} build --no-cache
+      - docker compose -f {{.COMPOSE_FILE}} -f {{.COMPOSE_DEV_FILE}} --env-file {{.MASTER_ENV}} --profile prod build --no-cache
 
   # ==================== XRAY ====================
 
@@ -296,6 +318,92 @@ tasks:
             -database "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable&x-migrations-table=${svc}_schema_migrations" \
             down -all || exit 1;
         done
+
+  # ==================== CADDY (public HTTPS edge) ====================
+  # Все таски требуют запущенного caddy-контейнера (task compose:up-prod).
+
+  caddy:up:
+    desc: Start only caddy (requires gateway to be up already)
+    deps: [env:generate]
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} --profile prod up -d caddy
+
+  caddy:reload:
+    desc: Reload Caddy config without restarting (picks up Caddyfile changes)
+    cmds:
+      - docker exec vpn-caddy caddy reload --config /etc/caddy/Caddyfile
+
+  caddy:restart:
+    desc: Full restart of Caddy container (re-reads env vars)
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} --profile prod restart caddy
+
+  caddy:logs:
+    desc: Tail Caddy logs
+    cmds:
+      - docker logs -f vpn-caddy
+
+  caddy:cert-info:
+    desc: List issued certificates inside the caddy volume
+    cmds:
+      - |
+        docker exec vpn-caddy sh -c '
+          if [ -d /data/caddy/certificates ]; then
+            ls -la /data/caddy/certificates/*/* 2>/dev/null || echo "No certs yet — Caddy issues on first HTTPS request.";
+          else
+            echo "Caddy data dir empty — first request will trigger ACME.";
+          fi
+        '
+
+  caddy:go-prod:
+    desc: "Switch from LE staging to production certs (wipes caddy volume!)"
+    prompt: "This will remove staging certs and request fresh production ones. Continue?"
+    cmds:
+      - sed -i.bak '/^\s*acme_ca https:\/\/acme-staging/d' deploy/compose/caddy/Caddyfile
+      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} --profile prod down caddy
+      - docker volume rm vpn-stack_vpn_caddy_data
+      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} --profile prod up -d caddy
+      - echo "✅ Switched to LE prod. Tail logs with 'task caddy:logs' to watch cert issuance."
+
+  domain:swap:
+    desc: 'Swap API domain in .env. Usage: task domain:swap NEW=api.example.com'
+    cmds:
+      - test -n "{{.NEW}}" || (echo "❌ Usage: task domain:swap NEW=api.example.com" && exit 1)
+      - sed -i.bak "s/^API_DOMAIN=.*/API_DOMAIN={{.NEW}}/" {{.MASTER_ENV}}
+      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} --profile prod up -d caddy
+      - echo "✅ API domain swapped to {{.NEW}}. Caddy will issue cert on first request (needs A-record → VPS IP)."
+
+  domain:swap-cdn:
+    desc: 'Swap CDN (Mini App) domain in .env. Usage: task domain:swap-cdn NEW=app.example.com'
+    cmds:
+      - test -n "{{.NEW}}" || (echo "❌ Usage: task domain:swap-cdn NEW=cdn.example.com" && exit 1)
+      - sed -i.bak "s/^CDN_DOMAIN=.*/CDN_DOMAIN={{.NEW}}/" {{.MASTER_ENV}}
+      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} --profile prod up -d caddy
+      - echo "✅ CDN domain swapped to {{.NEW}}. Don't forget to update @BotFather Mini App URL."
+
+  # ==================== NEXT (Telegram Mini App, vpn_next) ====================
+
+  next:build:
+    desc: Rebuild vpn-next image from scratch
+    deps: [env:generate]
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} --profile prod build --no-cache vpn-next
+
+  next:up:
+    desc: Start only vpn-next container
+    deps: [env:generate]
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} --profile prod up -d --build vpn-next
+
+  next:restart:
+    desc: Restart vpn-next container (after code/env change)
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} --profile prod restart vpn-next
+
+  next:logs:
+    desc: Tail vpn-next logs
+    cmds:
+      - docker logs -f vpn-next
 
   # ==================== UTIL ====================
 
