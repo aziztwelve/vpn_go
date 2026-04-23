@@ -24,12 +24,14 @@ var ErrInvalidPlan = errors.New("invalid plan or max_devices")
 //   - HandleUpdate: парсит Telegram update, роутит на нужный handler
 //   - handleSuccessfulPayment: идемпотентный mark-paid + Create{Subscription,VPNUser}
 //   - handleRefund: mark-refunded + Cancel{Subscription} + DisableVPNUser
+//   - handleStartCommand: приветствие + WebApp-кнопка на /start
 type PaymentService struct {
-	repo *repository.PaymentRepository
-	tg   *telegram.Client
-	sub  subpb.SubscriptionServiceClient
-	vpn  vpnpb.VPNServiceClient
-	log  *zap.Logger
+	repo       *repository.PaymentRepository
+	tg         *telegram.Client
+	sub        subpb.SubscriptionServiceClient
+	vpn        vpnpb.VPNServiceClient
+	miniAppURL string
+	log        *zap.Logger
 }
 
 func New(
@@ -37,9 +39,10 @@ func New(
 	tg *telegram.Client,
 	sub subpb.SubscriptionServiceClient,
 	vpn vpnpb.VPNServiceClient,
+	miniAppURL string,
 	log *zap.Logger,
 ) *PaymentService {
-	return &PaymentService{repo: repo, tg: tg, sub: sub, vpn: vpn, log: log}
+	return &PaymentService{repo: repo, tg: tg, sub: sub, vpn: vpn, miniAppURL: miniAppURL, log: log}
 }
 
 // CreateInvoice — шаг 1: создаём pending-запись и возвращаем t.me/ссылку.
@@ -106,10 +109,11 @@ func (s *PaymentService) CreateInvoice(ctx context.Context, userID int64, planID
 }
 
 // HandleUpdate — главная точка входа для webhook.
-// Распознаёт три типа update:
+// Распознаёт четыре типа update:
 //   - pre_checkout_query → answerPreCheckoutQuery(ok=true)
 //   - message.successful_payment → markPaid + CreateSubscription + CreateVPNUser
 //   - message.refunded_payment → markRefunded + CancelSubscription + DisableVPNUser
+//   - message.text == "/start" → welcome-сообщение с WebApp-кнопкой
 //
 // Для всего остального возвращает handled=false / action="ignored".
 func (s *PaymentService) HandleUpdate(ctx context.Context, raw []byte) (action string, err error) {
@@ -127,8 +131,67 @@ func (s *PaymentService) HandleUpdate(ctx context.Context, raw []byte) (action s
 	if upd.Message != nil && upd.Message.RefundedPayment != nil {
 		return s.handleRefund(ctx, upd.Message.RefundedPayment)
 	}
+	// /start — самая частая команда. Допускаем "/start", "/start@bot", "/start <deeplink>".
+	if upd.Message != nil && isStartCommand(upd.Message.Text) {
+		return s.handleStartCommand(ctx, upd.Message.Chat.ID)
+	}
 	return "ignored", nil
 }
+
+// isStartCommand — true если текст — /start (с опциональным @botname или payload).
+// Делаем явно а не через strings.HasPrefix("/start"), чтобы не ловить "/startfoo".
+func isStartCommand(text string) bool {
+	if text == "/start" {
+		return true
+	}
+	if len(text) > 6 && text[:6] == "/start" && (text[6] == ' ' || text[6] == '@') {
+		return true
+	}
+	return false
+}
+
+// handleStartCommand — шлёт приветствие с WebApp-кнопкой "Открыть Mini App".
+// Идемпотентный no-op: даже если юзер спамит /start, Telegram не ругается,
+// а мы просто отдаём тот же текст. Никаких БД-сайдэффектов.
+func (s *PaymentService) handleStartCommand(ctx context.Context, chatID int64) (string, error) {
+	if s.miniAppURL == "" {
+		s.log.Warn("/start received but MINIAPP_URL is empty — skipping welcome message",
+			zap.Int64("chat_id", chatID))
+		return "start_no_miniapp_url", nil
+	}
+
+	params := telegram.SendMessageParams{
+		ChatID:                chatID,
+		Text:                  welcomeText,
+		ParseMode:             "HTML",
+		DisableWebPagePreview: true,
+		ReplyMarkup: &telegram.InlineKeyboardMarkup{
+			InlineKeyboard: [][]telegram.InlineKeyboardButton{{
+				{
+					Text:   "🚀 Открыть приложение",
+					WebApp: &telegram.WebAppInfo{URL: s.miniAppURL},
+				},
+			}},
+		},
+	}
+	if err := s.tg.SendMessage(ctx, params); err != nil {
+		s.log.Error("sendMessage /start failed",
+			zap.Int64("chat_id", chatID), zap.Error(err))
+		// Не 5xx — приветствие не критично, Telegram не должен ретраить весь update.
+		return "start_send_failed", nil
+	}
+	s.log.Info("/start welcome sent", zap.Int64("chat_id", chatID))
+	return "start_sent", nil
+}
+
+// welcomeText — HTML-formatted. Обновлять здесь, не копипастить в десяти местах.
+const welcomeText = `<b>Привет! 👋</b>
+
+Я — бот для быстрого VPN через Telegram Mini App.
+
+Чтобы начать — открой приложение кнопкой ниже. Сразу получишь пробный период на 3 дня и 2 устройства — без оплаты и регистрации.
+
+После запуска выбери сервер и подключи любое устройство (iOS, Android, macOS, Windows).`
 
 // handlePreCheckout подтверждает что мы готовы принять оплату.
 // Если в БД нет pending с таким payment_id — отклоняем.
@@ -286,12 +349,20 @@ type tgUpdate struct {
 
 type tgMessage struct {
 	From              tgUser              `json:"from"`
+	Chat              tgChat              `json:"chat"`
+	Text              string              `json:"text,omitempty"`
 	SuccessfulPayment *tgSuccessfulPayment `json:"successful_payment,omitempty"`
 	RefundedPayment   *tgRefundedPayment   `json:"refunded_payment,omitempty"`
 }
 
 type tgUser struct {
 	ID int64 `json:"id"` // telegram_id
+}
+
+// tgChat — для sendMessage нам нужен chat.id (для приватных бесед совпадает
+// с user.id, но это не гарантировано — используем именно Chat).
+type tgChat struct {
+	ID int64 `json:"id"`
 }
 
 type tgPreCheckoutQuery struct {

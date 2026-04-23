@@ -409,6 +409,77 @@ tasks:
     cmds:
       - docker logs -f vpn-next
 
+  # ==================== TELEGRAM BOT ====================
+  # One-off операции над ботом: регистрация webhook и default menu-button.
+  # Читают AUTH_TELEGRAM_BOT_TOKEN, API_DOMAIN, MINIAPP_URL, PAYMENT_TELEGRAM_WEBHOOK_SECRET
+  # из master .env.
+
+  bot:info:
+    desc: "Показать состояние бота (getMe + getWebhookInfo + menu-button)"
+    dotenv: ['{{.MASTER_ENV}}']
+    cmds:
+      - |
+        T="$AUTH_TELEGRAM_BOT_TOKEN"
+        echo "=== getMe ==="
+        curl -s "https://api.telegram.org/bot$T/getMe" | python3 -m json.tool
+        echo ""
+        echo "=== getWebhookInfo ==="
+        curl -s "https://api.telegram.org/bot$T/getWebhookInfo" | python3 -m json.tool
+        echo ""
+        echo "=== getChatMenuButton (default) ==="
+        curl -s "https://api.telegram.org/bot$T/getChatMenuButton" | python3 -m json.tool
+
+  bot:set-menu:
+    desc: "Default menu-button → открывает Mini App (MINIAPP_URL)"
+    dotenv: ['{{.MASTER_ENV}}']
+    cmds:
+      - |
+        T="$AUTH_TELEGRAM_BOT_TOKEN"
+        URL="$MINIAPP_URL"
+        if [ -z "$URL" ]; then
+          echo "❌ MINIAPP_URL пустой. Укажи его в {{.MASTER_ENV}}."
+          exit 1
+        fi
+        echo "Ставим menu-button → $URL"
+        curl -s -X POST "https://api.telegram.org/bot$T/setChatMenuButton" \
+          -H "Content-Type: application/json" \
+          -d "{\"menu_button\":{\"type\":\"web_app\",\"text\":\"🚀 Открыть\",\"web_app\":{\"url\":\"$URL\"}}}" \
+          | python3 -m json.tool
+
+  bot:set-webhook:
+    desc: "Зарегистрировать webhook Gateway'я с allowed_updates для message+pre_checkout_query"
+    dotenv: ['{{.MASTER_ENV}}']
+    cmds:
+      - |
+        T="$AUTH_TELEGRAM_BOT_TOKEN"
+        SECRET="$PAYMENT_TELEGRAM_WEBHOOK_SECRET"
+        URL="https://$API_DOMAIN/api/v1/telegram/webhook"
+        if [ -z "$SECRET" ] || [ "$SECRET" = "change_me_random_string_webhook_secret" ]; then
+          echo "❌ PAYMENT_TELEGRAM_WEBHOOK_SECRET не задан или дефолтный. Сгенерируй и запиши в .env:"
+          echo "    openssl rand -hex 32"
+          exit 1
+        fi
+        echo "Регистрируем webhook → $URL"
+        curl -s -X POST "https://api.telegram.org/bot$T/setWebhook" \
+          -H "Content-Type: application/json" \
+          -d "{\"url\":\"$URL\",\"secret_token\":\"$SECRET\",\"allowed_updates\":[\"message\",\"pre_checkout_query\"],\"drop_pending_updates\":false}" \
+          | python3 -m json.tool
+
+  bot:setup:
+    desc: "Полный setup бота: set-menu + set-webhook + показать info"
+    cmds:
+      - task: bot:set-menu
+      - task: bot:set-webhook
+      - task: bot:info
+
+  bot:delete-webhook:
+    desc: "Удалить webhook (для отладки через long-polling)"
+    dotenv: ['{{.MASTER_ENV}}']
+    cmds:
+      - |
+        T="$AUTH_TELEGRAM_BOT_TOKEN"
+        curl -s "https://api.telegram.org/bot$T/deleteWebhook" | python3 -m json.tool
+
   # ==================== UTIL ====================
 
   clean:

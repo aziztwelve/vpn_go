@@ -34,12 +34,17 @@ type ServicesConfig struct {
 	VPNAddr          string
 }
 
-// TelegramConfig — для вызова Bot API (createInvoiceLink, answerPreCheckoutQuery).
+// TelegramConfig — для вызова Bot API (createInvoiceLink, answerPreCheckoutQuery,
+// sendMessage при /start и т.п.).
 type TelegramConfig struct {
 	BotToken string
 	// WebhookSecret — значение `secret_token` из setWebhook. Gateway валидирует
 	// header X-Telegram-Bot-Api-Secret-Token; сюда прокидывается для sanity-check.
 	WebhookSecret string
+	// MiniAppURL — https-URL Mini App (prod: https://cdn.osmonai.com). Используется
+	// в приветственном сообщении /start и в setChatMenuButton. Если пусто —
+	// /start-handler скипнет отправку WebApp-кнопки и покажет только текст.
+	MiniAppURL string
 }
 
 type LogConfig struct {
@@ -75,6 +80,7 @@ func New() (*Config, error) {
 		Telegram: TelegramConfig{
 			BotToken:      getEnv("TELEGRAM_BOT_TOKEN", ""),
 			WebhookSecret: getEnv("TELEGRAM_WEBHOOK_SECRET", ""),
+			MiniAppURL:    getEnv("MINIAPP_URL", ""),
 		},
 		Log: LogConfig{
 			Level: getEnv("LOG_LEVEL", "info"),

@@ -126,3 +126,85 @@ type RefundStarPaymentParams struct {
 func (c *Client) RefundStarPayment(ctx context.Context, params RefundStarPaymentParams) error {
 	return c.call(ctx, "refundStarPayment", params, nil)
 }
+
+// ============================================================
+// Messaging / UI (bot commands, welcome, menu-button)
+// ============================================================
+
+// WebAppInfo — ссылка на Mini App; используется в InlineKeyboardButton.web_app
+// и в MenuButton (type=web_app). Telegram открывает её прямо в in-app WebView.
+// https://core.telegram.org/bots/api#webappinfo
+type WebAppInfo struct {
+	URL string `json:"url"`
+}
+
+// InlineKeyboardButton — одна из кнопок в инлайн-клавиатуре под сообщением.
+// Поддерживаем только подмножество: url + web_app; callback_data/switch_inline
+// не нужны для приветственного сообщения.
+// https://core.telegram.org/bots/api#inlinekeyboardbutton
+type InlineKeyboardButton struct {
+	Text   string      `json:"text"`
+	URL    string      `json:"url,omitempty"`
+	WebApp *WebAppInfo `json:"web_app,omitempty"`
+}
+
+// InlineKeyboardMarkup — двумерный массив кнопок (строки × колонки).
+// https://core.telegram.org/bots/api#inlinekeyboardmarkup
+type InlineKeyboardMarkup struct {
+	InlineKeyboard [][]InlineKeyboardButton `json:"inline_keyboard"`
+}
+
+// SendMessageParams — параметры sendMessage. Не-используемые поля опущены —
+// добавим по мере надобности.
+// https://core.telegram.org/bots/api#sendmessage
+type SendMessageParams struct {
+	ChatID      int64                 `json:"chat_id"`
+	Text        string                `json:"text"`
+	ParseMode   string                `json:"parse_mode,omitempty"` // "HTML" | "Markdown" | "MarkdownV2"
+	ReplyMarkup *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
+	// LinkPreviewOptions.is_disabled = true — чтобы приветствие не тащило
+	// превью картинки с cdn.*. Для простоты используем legacy-поле.
+	DisableWebPagePreview bool `json:"disable_web_page_preview,omitempty"`
+}
+
+// SendMessage — послать текст юзеру/чату.
+func (c *Client) SendMessage(ctx context.Context, params SendMessageParams) error {
+	return c.call(ctx, "sendMessage", params, nil)
+}
+
+// MenuButton — объект chat-menu-button для setChatMenuButton.
+// Поддерживаем только web_app (остальные варианты: default, commands).
+// https://core.telegram.org/bots/api#menubutton
+type MenuButton struct {
+	Type   string      `json:"type"`             // "web_app" | "default" | "commands"
+	Text   string      `json:"text,omitempty"`   // только для web_app
+	WebApp *WebAppInfo `json:"web_app,omitempty"` // только для web_app
+}
+
+// SetChatMenuButtonParams — если ChatID = 0 (omitempty), выставляется
+// дефолтная menu-button для всех пользователей бота.
+// https://core.telegram.org/bots/api#setchatmenubutton
+type SetChatMenuButtonParams struct {
+	ChatID     int64       `json:"chat_id,omitempty"`
+	MenuButton *MenuButton `json:"menu_button"`
+}
+
+// SetChatMenuButton — выставить кнопку слева от поля ввода.
+// Без chat_id — применяется глобально (default). С chat_id — только этому чату.
+func (c *Client) SetChatMenuButton(ctx context.Context, params SetChatMenuButtonParams) error {
+	return c.call(ctx, "setChatMenuButton", params, nil)
+}
+
+// SetWebhookParams — регистрация/обновление URL вебхука.
+// https://core.telegram.org/bots/api#setwebhook
+type SetWebhookParams struct {
+	URL            string   `json:"url"`
+	SecretToken    string   `json:"secret_token,omitempty"`
+	AllowedUpdates []string `json:"allowed_updates,omitempty"`
+	DropPendingUpdates bool `json:"drop_pending_updates,omitempty"`
+}
+
+// SetWebhook — регистрирует вебхук. Вызывается one-off из deploy-скрипта.
+func (c *Client) SetWebhook(ctx context.Context, params SetWebhookParams) error {
+	return c.call(ctx, "setWebhook", params, nil)
+}

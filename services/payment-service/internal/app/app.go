@@ -95,6 +95,7 @@ func (a *App) initGRPC() error {
 		tg,
 		subpb.NewSubscriptionServiceClient(subConn),
 		vpnpb.NewVPNServiceClient(vpnConn),
+		a.config.Telegram.MiniAppURL,
 		a.logger,
 	)
 	paymentAPI := api.New(svc, a.logger)
