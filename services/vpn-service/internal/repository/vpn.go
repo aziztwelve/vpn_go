@@ -67,11 +67,24 @@ func (r *VPNRepository) GetServer(ctx context.Context, serverID int32) (*model.V
 	return server, nil
 }
 
-// UpsertServerByName — идемпотентный seed. Используется VPN Service при старте,
-// чтобы занести локальный Xray-сервер из env в БД (или обновить, если уже есть).
-// server_max_connections и description используют дефолты из БД при INSERT
-// и сохраняются при UPDATE (админ может поменять их через SQL).
-func (r *VPNRepository) UpsertServerByName(ctx context.Context, s *model.VPNServer) (*model.VPNServer, error) {
+// UpsertServerByHostPort — идемпотентный seed. Используется VPN Service при
+// старте, чтобы занести локальный Xray-сервер из env в БД или обновить
+// crypto-поля (когда ключи ротируются).
+//
+// Identity — пара (host, port), физический Xray-инбаунд. Это позволяет админу
+// свободно переименовывать сервер (name, location, country_code) — seed не
+// перетирает эти поля на UPDATE. Ранее identity был по name; после первого
+// же переименования сидер INSERT-ил дубликат.
+//
+// Что обновляется при конфликте:
+//   - crypto: public_key, private_key, short_id (нужно при ротации Reality-ключей)
+//   - Xray wiring: dest, server_names, xray_api_host/port, inbound_tag
+//
+// Что НЕ трогается (владение админа):
+//   - name, location, country_code (дисплейные)
+//   - is_active (админ выключает/включает сервер)
+//   - server_max_connections, description, load_percent
+func (r *VPNRepository) UpsertServerByHostPort(ctx context.Context, s *model.VPNServer) (*model.VPNServer, error) {
 	query := `
 		INSERT INTO vpn_servers (
 			name, location, country_code, host, port,
@@ -82,11 +95,7 @@ func (r *VPNRepository) UpsertServerByName(ctx context.Context, s *model.VPNServ
 			$6, $7, $8, $9, $10,
 			$11, $12, $13, $14
 		)
-		ON CONFLICT (name) DO UPDATE SET
-			location      = EXCLUDED.location,
-			country_code  = EXCLUDED.country_code,
-			host          = EXCLUDED.host,
-			port          = EXCLUDED.port,
+		ON CONFLICT (host, port) DO UPDATE SET
 			public_key    = EXCLUDED.public_key,
 			private_key   = EXCLUDED.private_key,
 			short_id      = EXCLUDED.short_id,
@@ -94,16 +103,19 @@ func (r *VPNRepository) UpsertServerByName(ctx context.Context, s *model.VPNServ
 			server_names  = EXCLUDED.server_names,
 			xray_api_host = EXCLUDED.xray_api_host,
 			xray_api_port = EXCLUDED.xray_api_port,
-			inbound_tag   = EXCLUDED.inbound_tag,
-			is_active     = EXCLUDED.is_active
-		RETURNING id, server_max_connections, description, created_at
+			inbound_tag   = EXCLUDED.inbound_tag
+		RETURNING id, name, location, country_code, is_active,
+		          server_max_connections, description, created_at
 	`
 
 	err := r.db.QueryRow(ctx, query,
 		s.Name, s.Location, s.CountryCode, s.Host, s.Port,
 		s.PublicKey, s.PrivateKey, s.ShortID, s.Dest, s.ServerNames,
 		s.XrayAPIHost, s.XrayAPIPort, s.InboundTag, s.IsActive,
-	).Scan(&s.ID, &s.ServerMaxConnections, &s.Description, &s.CreatedAt)
+	).Scan(
+		&s.ID, &s.Name, &s.Location, &s.CountryCode, &s.IsActive,
+		&s.ServerMaxConnections, &s.Description, &s.CreatedAt,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to upsert server: %w", err)
 	}

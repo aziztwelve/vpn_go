@@ -93,7 +93,7 @@ func (a *App) seedLocalServer(ctx context.Context) error {
 	}
 
 	repo := repository.NewVPNRepository(a.db)
-	seeded, err := repo.UpsertServerByName(ctx, &model.VPNServer{
+	seeded, err := repo.UpsertServerByHostPort(ctx, &model.VPNServer{
 		Name:        "Local Xray (dev)",
 		Location:    "Localhost",
 		CountryCode: "XX",
