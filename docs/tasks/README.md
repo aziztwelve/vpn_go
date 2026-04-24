@@ -25,3 +25,5 @@
 - [04-caddy-auto-tls.md](./04-caddy-auto-tls.md) — 🟢 Публичный домен + авто-TLS через Caddy (заменяет 9.2/9.7)
 - [05-trial-period.md](./05-trial-period.md) — 🟢 Автоматический пробный период 3 дня новым юзерам
 - [06-traffic-caps.md](./06-traffic-caps.md) — 🟡 Лимиты трафика на тариф (против перепродажи без per-device UUID)
+- [07-fake-cdn-domain.md](./07-fake-cdn-domain.md) — ⏸ Отложено: фейк-CDN домен sbrf-cdn571.ru (Reality+sni=github.com уже решает задачу)
+- [08-ha-backend-mirror.md](./08-ha-backend-mirror.md) — ⏸ Отложено: HA backend с failover (зависит от 07)
