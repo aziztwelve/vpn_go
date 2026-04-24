@@ -12,6 +12,7 @@ import (
 	"github.com/vpn/gateway/internal/client"
 	"github.com/vpn/gateway/internal/config"
 	"github.com/vpn/gateway/internal/handler"
+	gwmw "github.com/vpn/gateway/internal/middleware"
 	"github.com/vpn/platform/pkg/closer"
 	authmw "github.com/vpn/platform/pkg/middleware"
 	"go.uber.org/zap"
@@ -136,6 +137,16 @@ func (a *App) Start() error {
 	// JWT middleware для защищённых ручек. Секрет — общий с Auth Service.
 	jwtMiddleware := authmw.JWTMiddleware(a.config.JWT.Secret)
 
+	// Rate-limit для публичного subscription endpoint (нет JWT → легко
+	// перебирать токены). 30 req/min на IP — достаточно легитимных клиентов
+	// (HAPP, Hiddify обновляют Profile-Update-Interval=1h, Mini App
+	// дёргает при нажатии кнопки), брутфорс отрезает.
+	subscriptionLimiter := gwmw.NewRateLimiter(30, time.Minute)
+	a.closer.Add(func(ctx context.Context) error {
+		subscriptionLimiter.Stop()
+		return nil
+	})
+
 	// API routes
 	router.Route("/api/v1", func(r chi.Router) {
 		r.Get("/", func(w http.ResponseWriter, r *http.Request) {
@@ -150,8 +161,9 @@ func (a *App) Start() error {
 		// Прайс-лист доступен и до логина (приветственный экран Mini App).
 		r.Get("/subscriptions/plans", subscriptionHandler.ListPlans)
 		r.Get("/subscriptions/plans/{planId}/pricing", subscriptionHandler.GetDevicePricing)
-		// Subscription config для VPN клиентов (Happ, V2RayNG, etc.)
-		r.Get("/subscription/{token}", subscriptionConfigHandler.SubscriptionConfig)
+		// Subscription config для VPN клиентов (Happ, V2RayNG, etc.).
+		// Ratelimit — защита от брутфорса токенов (см. subscriptionLimiter выше).
+		r.With(subscriptionLimiter.Handler).Get("/subscription/{token}", subscriptionConfigHandler.SubscriptionConfig)
 		// Telegram webhook — публичный, но защищён shared-секретом
 		// в заголовке X-Telegram-Bot-Api-Secret-Token (проверяется в handler'е).
 		r.Post("/telegram/webhook", paymentHandler.TelegramWebhook)
@@ -173,6 +185,9 @@ func (a *App) Start() error {
 			r.Get("/vpn/servers/{serverId}/link", vpnHandler.GetVLESSLink)
 			r.Get("/vpn/connections", vpnHandler.GetActiveConnections)
 			r.Delete("/vpn/devices/{connectionId}", vpnHandler.DisconnectDevice)
+			// Subscription token для Mini App: фронт вызывает на /connect,
+			// собирает URL подписки и деплинки для клиентов (Happ/Hiddify/…).
+			r.Get("/vpn/subscription-token", vpnHandler.GetSubscriptionToken)
 
 			// Payments
 			r.Post("/payments", paymentHandler.CreateInvoice)

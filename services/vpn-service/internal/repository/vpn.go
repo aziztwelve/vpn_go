@@ -158,16 +158,17 @@ func (r *VPNRepository) ListActiveServerIDs(ctx context.Context) ([]int32, error
 }
 
 // VPN Users
-func (r *VPNRepository) CreateVPNUser(ctx context.Context, userID, subscriptionID int64, uuid, email, flow string) (*model.VPNUser, error) {
+func (r *VPNRepository) CreateVPNUser(ctx context.Context, userID, subscriptionID int64, uuid, email, flow, subscriptionToken string) (*model.VPNUser, error) {
 	query := `
-		INSERT INTO vpn_users (user_id, subscription_id, uuid, email, flow)
-		VALUES ($1, $2, $3, $4, $5)
-		RETURNING id, user_id, subscription_id, uuid, email, flow, created_at
+		INSERT INTO vpn_users (user_id, subscription_id, uuid, email, flow, subscription_token)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING id, user_id, subscription_id, uuid, email, flow, subscription_token, created_at
 	`
 
 	vpnUser := &model.VPNUser{}
-	err := r.db.QueryRow(ctx, query, userID, subscriptionID, uuid, email, flow).Scan(
-		&vpnUser.ID, &vpnUser.UserID, &vpnUser.SubscriptionID, &vpnUser.UUID, &vpnUser.Email, &vpnUser.Flow, &vpnUser.CreatedAt,
+	err := r.db.QueryRow(ctx, query, userID, subscriptionID, uuid, email, flow, subscriptionToken).Scan(
+		&vpnUser.ID, &vpnUser.UserID, &vpnUser.SubscriptionID, &vpnUser.UUID,
+		&vpnUser.Email, &vpnUser.Flow, &vpnUser.SubscriptionToken, &vpnUser.CreatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create vpn user: %w", err)
@@ -177,11 +178,13 @@ func (r *VPNRepository) CreateVPNUser(ctx context.Context, userID, subscriptionI
 }
 
 func (r *VPNRepository) GetVPNUserByUserID(ctx context.Context, userID int64) (*model.VPNUser, error) {
-	query := `SELECT id, user_id, subscription_id, uuid, email, flow, created_at FROM vpn_users WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`
+	query := `SELECT id, user_id, subscription_id, uuid, email, flow, subscription_token, created_at
+		FROM vpn_users WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`
 
 	vpnUser := &model.VPNUser{}
 	err := r.db.QueryRow(ctx, query, userID).Scan(
-		&vpnUser.ID, &vpnUser.UserID, &vpnUser.SubscriptionID, &vpnUser.UUID, &vpnUser.Email, &vpnUser.Flow, &vpnUser.CreatedAt,
+		&vpnUser.ID, &vpnUser.UserID, &vpnUser.SubscriptionID, &vpnUser.UUID,
+		&vpnUser.Email, &vpnUser.Flow, &vpnUser.SubscriptionToken, &vpnUser.CreatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("vpn user not found: %w", err)
@@ -190,10 +193,41 @@ func (r *VPNRepository) GetVPNUserByUserID(ctx context.Context, userID int64) (*
 	return vpnUser, nil
 }
 
+// GetSubscriptionConfigByToken — единый JOIN vpn_users × subscriptions
+// по subscription_token. Возвращает vpn_user + expires_at/max_devices
+// активной подписки. Если токен не найден или подписка неактивна/истекла —
+// error. Именно точка входа для публичного subscription endpoint'а.
+//
+// Статусы считаются активными: 'active', 'trial'.
+func (r *VPNRepository) GetSubscriptionConfigByToken(ctx context.Context, token string) (*model.VPNUser, time.Time, int32, error) {
+	query := `
+		SELECT vu.id, vu.user_id, vu.subscription_id, vu.uuid, vu.email, vu.flow,
+		       vu.subscription_token, vu.created_at,
+		       s.expires_at, s.max_devices
+		FROM vpn_users vu
+		JOIN subscriptions s ON s.id = vu.subscription_id
+		WHERE vu.subscription_token = $1
+		  AND s.status IN ('active', 'trial')
+		  AND s.expires_at > NOW()
+	`
+	vpnUser := &model.VPNUser{}
+	var expiresAt time.Time
+	var maxDevices int32
+	err := r.db.QueryRow(ctx, query, token).Scan(
+		&vpnUser.ID, &vpnUser.UserID, &vpnUser.SubscriptionID, &vpnUser.UUID,
+		&vpnUser.Email, &vpnUser.Flow, &vpnUser.SubscriptionToken, &vpnUser.CreatedAt,
+		&expiresAt, &maxDevices,
+	)
+	if err != nil {
+		return nil, time.Time{}, 0, fmt.Errorf("subscription by token: %w", err)
+	}
+	return vpnUser, expiresAt, maxDevices, nil
+}
+
 // ListAllVPNUsers возвращает id+email всех юзеров — используется heartbeat-ом
 // для опроса Xray Stats API.
 func (r *VPNRepository) ListAllVPNUsers(ctx context.Context) ([]*model.VPNUser, error) {
-	query := `SELECT id, user_id, subscription_id, uuid, email, flow, created_at FROM vpn_users`
+	query := `SELECT id, user_id, subscription_id, uuid, email, flow, subscription_token, created_at FROM vpn_users`
 	rows, err := r.db.Query(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("list vpn users: %w", err)
@@ -203,7 +237,7 @@ func (r *VPNRepository) ListAllVPNUsers(ctx context.Context) ([]*model.VPNUser, 
 	var users []*model.VPNUser
 	for rows.Next() {
 		u := &model.VPNUser{}
-		if err := rows.Scan(&u.ID, &u.UserID, &u.SubscriptionID, &u.UUID, &u.Email, &u.Flow, &u.CreatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.UserID, &u.SubscriptionID, &u.UUID, &u.Email, &u.Flow, &u.SubscriptionToken, &u.CreatedAt); err != nil {
 			return nil, err
 		}
 		users = append(users, u)

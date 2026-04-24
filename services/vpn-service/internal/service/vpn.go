@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
@@ -14,6 +16,18 @@ import (
 	"github.com/vpn/vpn-service/internal/repository"
 	"go.uber.org/zap"
 )
+
+// generateSubscriptionToken — 24 байта случайности → 48 hex символов.
+// Примерно 192 бита энтропии, коллизии невозможны при любой разумной нагрузке.
+// Используется как публичный путь `/api/v1/subscription/<token>` — отдельный
+// от Xray UUID юзера.
+func generateSubscriptionToken() (string, error) {
+	buf := make([]byte, 24)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("rand: %w", err)
+	}
+	return hex.EncodeToString(buf), nil
+}
 
 // DeviceActivityWindow — сколько времени без роста трафика устройство
 // считается "живым" слотом. По истечении окна slot освобождается, юзер
@@ -53,7 +67,12 @@ func (s *VPNService) CreateVPNUser(ctx context.Context, userID, subscriptionID i
 	email := fmt.Sprintf("user%d@vpn.local", userID)
 	flow := "xtls-rprx-vision"
 
-	vpnUser, err := s.repo.CreateVPNUser(ctx, userID, subscriptionID, userUUID, email, flow)
+	subToken, err := generateSubscriptionToken()
+	if err != nil {
+		return nil, fmt.Errorf("generate subscription token: %w", err)
+	}
+
+	vpnUser, err := s.repo.CreateVPNUser(ctx, userID, subscriptionID, userUUID, email, flow, subToken)
 	if err != nil {
 		return nil, err
 	}
@@ -349,6 +368,56 @@ func (s *VPNService) ResyncServer(ctx context.Context, serverID int32) (*ResyncR
 		zap.Int32("failed", res.Failed),
 	)
 	return res, nil
+}
+
+// GetSubscriptionConfig — собрать полные данные подписки по публичному
+// subscription_token. Вызывается gateway-ом для `/api/v1/subscription/{token}`.
+// Возвращает:
+//   - vpn_user (uuid, email, flow, token)
+//   - список активных серверов (для генерации VLESS-ссылок и JSON-конфигов)
+//   - expires_at подписки (для заголовка Subscription-Userinfo)
+//   - max_devices (для UI-подсказки клиента)
+//
+// Если токен не найден или подписка неактивна/истекла — ошибка (gateway
+// отдаёт 404).
+func (s *VPNService) GetSubscriptionConfig(ctx context.Context, token string) (*model.SubscriptionConfig, error) {
+	if token == "" {
+		return nil, errors.New("empty subscription token")
+	}
+
+	vpnUser, expiresAt, maxDevices, err := s.repo.GetSubscriptionConfigByToken(ctx, token)
+	if err != nil {
+		return nil, fmt.Errorf("lookup token: %w", err)
+	}
+
+	servers, err := s.repo.ListServers(ctx, true)
+	if err != nil {
+		return nil, fmt.Errorf("list active servers: %w", err)
+	}
+
+	return &model.SubscriptionConfig{
+		VPNUser:    vpnUser,
+		Servers:    servers,
+		ExpiresAt:  expiresAt,
+		MaxDevices: maxDevices,
+	}, nil
+}
+
+// GetSubscriptionToken — достать subscription_token юзера (JWT-защищённая
+// ручка фронта: "дай мне мою ссылку подписки"). Под капотом — просто
+// GetVPNUserByUserID + проверка что подписка ещё жива.
+func (s *VPNService) GetSubscriptionToken(ctx context.Context, userID int64) (string, time.Time, error) {
+	vpnUser, err := s.repo.GetVPNUserByUserID(ctx, userID)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("vpn user not found: %w", err)
+	}
+	// Проверяем что подписка действительно ещё активна (фронт не должен
+	// показывать URL подписки для истёкшего юзера).
+	_, expiresAt, _, err := s.repo.GetSubscriptionConfigByToken(ctx, vpnUser.SubscriptionToken)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("active subscription not found: %w", err)
+	}
+	return vpnUser.SubscriptionToken, expiresAt, nil
 }
 
 // isNotFound — эвристика Xray: при RemoveUser на несуществующего юзера.

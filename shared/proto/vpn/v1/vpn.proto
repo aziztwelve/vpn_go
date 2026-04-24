@@ -31,6 +31,16 @@ service VPNService {
   // Вызывается после INSERT нового vpn_servers при масштабировании.
   // Идемпотентно (already exists → skip).
   rpc ResyncServer(ResyncServerRequest) returns (ResyncServerResponse);
+
+  // Собрать данные для публичной подписки по subscription_token.
+  // Вызывается gateway-ом на GET /api/v1/subscription/{token}.
+  // Не требует user_id: токен сам себе идентификатор.
+  rpc GetSubscriptionConfig(GetSubscriptionConfigRequest) returns (GetSubscriptionConfigResponse);
+
+  // Получить subscription_token текущего юзера. Вызывается Mini App'ом
+  // (gateway проксирует с JWT), чтобы собрать URL подписки на фронте.
+  // Если vpn_user не создан (нет активной подписки) — NotFound.
+  rpc GetSubscriptionToken(GetSubscriptionTokenRequest) returns (GetSubscriptionTokenResponse);
 }
 
 message DisableVPNUserRequest {
@@ -124,6 +134,32 @@ message VPNUser {
   string email = 5;
   string flow = 6;
   string created_at = 7;
+  // Публичный токен для URL подписки `/api/v1/subscription/{token}`.
+  string subscription_token = 8;
+}
+
+message GetSubscriptionConfigRequest {
+  string token = 1;
+}
+
+message GetSubscriptionConfigResponse {
+  // Данные юзера (uuid для VLESS, email для идентификации в Xray).
+  VPNUser vpn_user = 1;
+  // Активные сервера — для каждого отдаём отдельный VLESS-outbound в подписке.
+  repeated Server servers = 2;
+  // Окно подписки — для заголовка Subscription-Userinfo (expire=unix).
+  string expires_at = 3;
+  // Полезно клиенту знать лимит устройств (UI-подсказка).
+  int32 max_devices = 4;
+}
+
+message GetSubscriptionTokenRequest {
+  int64 user_id = 1;
+}
+
+message GetSubscriptionTokenResponse {
+  string subscription_token = 1;
+  string expires_at = 2;
 }
 
 message Server {

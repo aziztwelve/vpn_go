@@ -2,8 +2,11 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/vpn/gateway/internal/client"
@@ -128,6 +131,77 @@ func (h *VPNHandler) DisconnectDevice(w http.ResponseWriter, r *http.Request) {
 		"success":       resp.Success,
 		"connection_id": id,
 	})
+}
+
+// GetSubscriptionToken — GET /api/v1/vpn/subscription-token (JWT).
+// Возвращает публичный subscription_token текущего юзера + полный URL
+// подписки, который Mini App вставляет в happ:// / hiddify:// / streisand:// deeplinks.
+//
+// Ответ:
+//
+//	{
+//	  "subscription_token": "ab12...",
+//	  "subscription_url":   "https://cdn.osmonai.com/api/v1/subscription/ab12...",
+//	  "expires_at":         "2026-05-13T16:10:00Z"
+//	}
+//
+// 404 — если у юзера нет активной подписки (vpn_user не создан или expired).
+func (h *VPNHandler) GetSubscriptionToken(w http.ResponseWriter, r *http.Request) {
+	userID, ok := userIDFromRequest(w, r)
+	if !ok {
+		return
+	}
+
+	resp, err := h.vpnClient.GetSubscriptionToken(r.Context(), userID)
+	if err != nil {
+		if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error":   "no_active_subscription",
+				"message": "Active subscription not found. Purchase a plan first.",
+			})
+			return
+		}
+		h.logger.Error("Failed to get subscription token", zap.Error(err))
+		http.Error(w, "Failed to get subscription token", http.StatusInternalServerError)
+		return
+	}
+
+	// Base URL подписки — откуда клиент будет качать подписку. Настраивается
+	// через env PUBLIC_BASE_URL (за Cloudflare Tunnel / прод-доменом).
+	// Фоллбэк — текущий Host из запроса, чтобы работало и локально, и в прод.
+	baseURL := resolvePublicBaseURL(r)
+	subURL := fmt.Sprintf("%s/api/v1/subscription/%s", baseURL, resp.GetSubscriptionToken())
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"subscription_token": resp.GetSubscriptionToken(),
+		"subscription_url":   subURL,
+		"expires_at":         resp.GetExpiresAt(),
+	})
+}
+
+// resolvePublicBaseURL — приоритет PUBLIC_BASE_URL env → X-Forwarded-* → Host.
+// Нужно потому что за Cloudflare Tunnel req.Host = локальный, а клиенту нужен
+// публичный домен.
+func resolvePublicBaseURL(r *http.Request) string {
+	if v := os.Getenv("PUBLIC_BASE_URL"); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	proto := r.Header.Get("X-Forwarded-Proto")
+	if proto == "" {
+		if r.TLS != nil {
+			proto = "https"
+		} else {
+			proto = "http"
+		}
+	}
+	host := r.Header.Get("X-Forwarded-Host")
+	if host == "" {
+		host = r.Host
+	}
+	return fmt.Sprintf("%s://%s", proto, host)
 }
 
 func (h *VPNHandler) GetActiveConnections(w http.ResponseWriter, r *http.Request) {

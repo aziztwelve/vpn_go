@@ -71,3 +71,11 @@ func (c *VPNClient) DisconnectDevice(ctx context.Context, connectionID int64) (*
 		ConnectionId: connectionID,
 	})
 }
+
+func (c *VPNClient) GetSubscriptionConfig(ctx context.Context, token string) (*pb.GetSubscriptionConfigResponse, error) {
+	return c.client.GetSubscriptionConfig(ctx, &pb.GetSubscriptionConfigRequest{Token: token})
+}
+
+func (c *VPNClient) GetSubscriptionToken(ctx context.Context, userID int64) (*pb.GetSubscriptionTokenResponse, error) {
+	return c.client.GetSubscriptionToken(ctx, &pb.GetSubscriptionTokenRequest{UserId: userID})
+}

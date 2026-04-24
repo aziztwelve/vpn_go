@@ -4,12 +4,31 @@ import (
 	"context"
 	"errors"
 
+	"github.com/vpn/vpn-service/internal/model"
 	"github.com/vpn/vpn-service/internal/service"
 	pb "github.com/vpn/shared/pkg/proto/vpn/v1"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+// toPbVPNUser — доменная модель → proto. Вынесено чтобы не дублировать
+// маппинг в CreateVPNUser / GetVPNUser / GetSubscriptionConfig.
+func toPbVPNUser(u *model.VPNUser) *pb.VPNUser {
+	if u == nil {
+		return nil
+	}
+	return &pb.VPNUser{
+		Id:                u.ID,
+		UserId:            u.UserID,
+		SubscriptionId:    u.SubscriptionID,
+		Uuid:              u.UUID,
+		Email:             u.Email,
+		Flow:              u.Flow,
+		SubscriptionToken: u.SubscriptionToken,
+		CreatedAt:         u.CreatedAt.Format("2006-01-02T15:04:05Z"),
+	}
+}
 
 type VPNAPI struct {
 	pb.UnimplementedVPNServiceServer
@@ -36,15 +55,7 @@ func (a *VPNAPI) CreateVPNUser(ctx context.Context, req *pb.CreateVPNUserRequest
 	}
 
 	return &pb.CreateVPNUserResponse{
-		VpnUser: &pb.VPNUser{
-			Id:             vpnUser.ID,
-			UserId:         vpnUser.UserID,
-			SubscriptionId: vpnUser.SubscriptionID,
-			Uuid:           vpnUser.UUID,
-			Email:          vpnUser.Email,
-			Flow:           vpnUser.Flow,
-			CreatedAt:      vpnUser.CreatedAt.Format("2006-01-02T15:04:05Z"),
-		},
+		VpnUser: toPbVPNUser(vpnUser),
 	}, nil
 }
 
@@ -60,15 +71,7 @@ func (a *VPNAPI) GetVPNUser(ctx context.Context, req *pb.GetVPNUserRequest) (*pb
 	}
 
 	return &pb.GetVPNUserResponse{
-		VpnUser: &pb.VPNUser{
-			Id:             vpnUser.ID,
-			UserId:         vpnUser.UserID,
-			SubscriptionId: vpnUser.SubscriptionID,
-			Uuid:           vpnUser.UUID,
-			Email:          vpnUser.Email,
-			Flow:           vpnUser.Flow,
-			CreatedAt:      vpnUser.CreatedAt.Format("2006-01-02T15:04:05Z"),
-		},
+		VpnUser: toPbVPNUser(vpnUser),
 	}, nil
 }
 
@@ -192,6 +195,61 @@ func (a *VPNAPI) DisableVPNUser(ctx context.Context, req *pb.DisableVPNUserReque
 		return nil, status.Error(codes.Internal, "failed to disable vpn user")
 	}
 	return &pb.DisableVPNUserResponse{Success: true, ServersCleaned: cleaned}, nil
+}
+
+func (a *VPNAPI) GetSubscriptionConfig(ctx context.Context, req *pb.GetSubscriptionConfigRequest) (*pb.GetSubscriptionConfigResponse, error) {
+	if req.GetToken() == "" {
+		return nil, status.Error(codes.InvalidArgument, "token is required")
+	}
+
+	cfg, err := a.service.GetSubscriptionConfig(ctx, req.GetToken())
+	if err != nil {
+		// Токен не найден или подписка истекла → NotFound.
+		a.logger.Info("subscription config lookup failed",
+			zap.String("token", req.GetToken()[:min(8, len(req.GetToken()))]+"…"),
+			zap.Error(err))
+		return nil, status.Error(codes.NotFound, "subscription not found or expired")
+	}
+
+	pbServers := make([]*pb.Server, 0, len(cfg.Servers))
+	for _, s := range cfg.Servers {
+		pbServers = append(pbServers, &pb.Server{
+			Id:          s.ID,
+			Name:        s.Name,
+			Location:    s.Location,
+			CountryCode: s.CountryCode,
+			Host:        s.Host,
+			Port:        s.Port,
+			PublicKey:   s.PublicKey,
+			ShortId:     s.ShortID,
+			Dest:        s.Dest,
+			ServerNames: s.ServerNames,
+			IsActive:    s.IsActive,
+			LoadPercent: s.LoadPercent,
+		})
+	}
+
+	return &pb.GetSubscriptionConfigResponse{
+		VpnUser:    toPbVPNUser(cfg.VPNUser),
+		Servers:    pbServers,
+		ExpiresAt:  cfg.ExpiresAt.UTC().Format("2006-01-02T15:04:05Z"),
+		MaxDevices: cfg.MaxDevices,
+	}, nil
+}
+
+func (a *VPNAPI) GetSubscriptionToken(ctx context.Context, req *pb.GetSubscriptionTokenRequest) (*pb.GetSubscriptionTokenResponse, error) {
+	if req.GetUserId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "user_id is required")
+	}
+	token, expiresAt, err := a.service.GetSubscriptionToken(ctx, req.GetUserId())
+	if err != nil {
+		a.logger.Info("subscription token lookup failed", zap.Int64("user_id", req.GetUserId()), zap.Error(err))
+		return nil, status.Error(codes.NotFound, "no active subscription for user")
+	}
+	return &pb.GetSubscriptionTokenResponse{
+		SubscriptionToken: token,
+		ExpiresAt:         expiresAt.UTC().Format("2006-01-02T15:04:05Z"),
+	}, nil
 }
 
 func (a *VPNAPI) ResyncServer(ctx context.Context, req *pb.ResyncServerRequest) (*pb.ResyncServerResponse, error) {

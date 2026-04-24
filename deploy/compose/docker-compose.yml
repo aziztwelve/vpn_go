@@ -209,6 +209,11 @@ services:
       JWT_SECRET: ${AUTH_JWT_SECRET}
       # Shared secret для webhook'а от Telegram — тот же что у payment-service.
       TELEGRAM_WEBHOOK_SECRET: ${PAYMENT_TELEGRAM_WEBHOOK_SECRET}
+      # Публичный URL (Caddy edge), по которому клиенты Happ/Hiddify/V2RayNG
+      # могут скачать подписку. Используется в /vpn/subscription-token для
+      # построения subscription_url. Без этой env гейтвей вернул бы URL с
+      # хостом gateway:8081 (internal) — Happ на телефоне не достучится.
+      PUBLIC_BASE_URL: https://${CDN_DOMAIN}
       LOG_LEVEL: ${GATEWAY_LOG_LEVEL}
     # Gateway НЕ публикуется наружу: только через caddy:443.
     # Если нужен прямой доступ (для локального дебага) — запусти с оверрайдом
