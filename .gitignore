@@ -49,3 +49,11 @@ shared/pkg/proto/
 
 # Build artifacts
 tmp/
+
+# Go-service бинари локальной сборки (матчим только
+# services/<name>/<name>, чтобы пакеты с Go-исходниками не зацепить).
+services/*/auth-service
+services/*/payment-service
+services/*/subscription-service
+services/*/vpn-service
+services/*/gateway
