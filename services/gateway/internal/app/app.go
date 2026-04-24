@@ -168,6 +168,13 @@ func (a *App) Start() error {
 		// в заголовке X-Telegram-Bot-Api-Secret-Token (проверяется в handler'е).
 		r.Post("/telegram/webhook", paymentHandler.TelegramWebhook)
 
+		// Универсальный webhook handler для всех провайдеров
+		// /api/v1/payments/webhook/telegram_stars
+		// /api/v1/payments/webhook/yoomoney
+		// /api/v1/payments/webhook/yookassa
+		// /api/v1/payments/webhook/wata
+		r.Post("/payments/webhook/{provider}", paymentHandler.HandleWebhook)
+
 		// ───── Защищённые ручки (Authorization: Bearer <JWT>) ─────────
 		r.Group(func(r chi.Router) {
 			r.Use(jwtMiddleware)

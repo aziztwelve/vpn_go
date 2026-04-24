@@ -162,6 +162,14 @@ services:
       TELEGRAM_WEBHOOK_SECRET: ${PAYMENT_TELEGRAM_WEBHOOK_SECRET}
       MINIAPP_URL: ${MINIAPP_URL}
       LOG_LEVEL: ${PAYMENT_LOG_LEVEL}
+      # WATA H2H API (доп. провайдер). Если WATA_ENABLED=false —
+      # провайдер не регистрируется, остальные переменные игнорируются.
+      WATA_ENABLED: ${PAYMENT_WATA_ENABLED:-false}
+      WATA_BASE_URL: ${PAYMENT_WATA_BASE_URL:-}
+      WATA_ACCESS_TOKEN: ${PAYMENT_WATA_ACCESS_TOKEN:-}
+      WATA_SUCCESS_URL: ${PAYMENT_WATA_SUCCESS_URL:-}
+      WATA_FAIL_URL: ${PAYMENT_WATA_FAIL_URL:-}
+      WATA_LINK_TTL: ${PAYMENT_WATA_LINK_TTL:-72h}
     ports:
       - "${PAYMENT_GRPC_PORT}:${PAYMENT_GRPC_PORT}"
     networks: [vpn]

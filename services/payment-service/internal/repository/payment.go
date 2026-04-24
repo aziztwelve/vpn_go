@@ -39,27 +39,43 @@ func (r *PaymentRepository) CreatePending(ctx context.Context, p *model.Payment)
 	return id, nil
 }
 
-// MarkPaid атомарно меняет pending → paid c external_id. Возвращает:
-//   - alreadyPaid=true если запись с таким external_id уже существует
-//     (идемпотентный ретрай webhook'а)
-//   - ok=true если это первый успешный mark
-func (r *PaymentRepository) MarkPaid(ctx context.Context, paymentID int64, externalID string) (alreadyPaid bool, err error) {
+// MarkPaid атомарно меняет pending → paid c external_id и metadata.
+func (r *PaymentRepository) MarkPaid(ctx context.Context, paymentID int64, metadata map[string]string) error {
 	const q = `
 		UPDATE payments
-		SET status = 'paid', external_id = $2, paid_at = NOW()
+		SET status = 'paid', metadata = $2, paid_at = NOW()
 		WHERE id = $1 AND status = 'pending'
 	`
-	tag, err := r.db.Exec(ctx, q, paymentID, externalID)
+	tag, err := r.db.Exec(ctx, q, paymentID, metadata)
 	if err != nil {
-		// UNIQUE violation на external_id → кто-то другой (или ретрай) уже отметил
-		// эту же зарядку как paid. Для идемпотентности — считаем это успехом.
-		return true, fmt.Errorf("mark paid: %w", err)
+		return fmt.Errorf("mark paid: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		// Запись уже не pending (либо дубликат webhook'а, либо плохая сорс-запись).
-		return true, nil
+		// Запись уже не pending (дубликат webhook'а)
+		return nil
 	}
-	return false, nil
+	return nil
+}
+
+// UpdateExternalID обновляет external_id для платежа.
+func (r *PaymentRepository) UpdateExternalID(ctx context.Context, paymentID int64, externalID string) error {
+	const q = `UPDATE payments SET external_id = $2 WHERE id = $1`
+	_, err := r.db.Exec(ctx, q, paymentID, externalID)
+	return err
+}
+
+// MarkCancelled переводит pending → cancelled.
+func (r *PaymentRepository) MarkCancelled(ctx context.Context, paymentID int64) error {
+	const q = `UPDATE payments SET status = 'cancelled' WHERE id = $1 AND status = 'pending'`
+	_, err := r.db.Exec(ctx, q, paymentID)
+	return err
+}
+
+// MarkFailed переводит pending → failed.
+func (r *PaymentRepository) MarkFailed(ctx context.Context, paymentID int64) error {
+	const q = `UPDATE payments SET status = 'failed' WHERE id = $1 AND status = 'pending'`
+	_, err := r.db.Exec(ctx, q, paymentID)
+	return err
 }
 
 // GetByExternalID — для идемпотентной проверки "этот payment_charge_id уже обработан?".

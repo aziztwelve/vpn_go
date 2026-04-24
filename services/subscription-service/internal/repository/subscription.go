@@ -22,7 +22,7 @@ func NewSubscriptionRepository(db *pgxpool.Pool) *SubscriptionRepository {
 // не покупаются. Если нужны все (напр. для админки) — parameter nop сейчас, можно
 // расширить отдельным флагом.
 func (r *SubscriptionRepository) ListPlans(ctx context.Context, activeOnly bool) ([]*model.SubscriptionPlan, error) {
-	query := `SELECT id, name, duration_days, max_devices, base_price, is_active, price_stars, is_trial FROM subscription_plans WHERE is_trial = false`
+	query := `SELECT id, name, duration_days, max_devices, base_price, is_active, is_trial FROM subscription_plans WHERE is_trial = false`
 	if activeOnly {
 		query += ` AND is_active = true`
 	}
@@ -38,7 +38,7 @@ func (r *SubscriptionRepository) ListPlans(ctx context.Context, activeOnly bool)
 	for rows.Next() {
 		plan := &model.SubscriptionPlan{}
 		if err := rows.Scan(&plan.ID, &plan.Name, &plan.DurationDays, &plan.MaxDevices,
-			&plan.BasePrice, &plan.IsActive, &plan.PriceStars, &plan.IsTrial); err != nil {
+			&plan.BasePrice, &plan.IsActive, &plan.IsTrial); err != nil {
 			return nil, err
 		}
 		plans = append(plans, plan)
@@ -50,7 +50,7 @@ func (r *SubscriptionRepository) ListPlans(ctx context.Context, activeOnly bool)
 // GetTrialPlan возвращает первый активный триал-план (обычно id=99).
 func (r *SubscriptionRepository) GetTrialPlan(ctx context.Context) (*model.SubscriptionPlan, error) {
 	const q = `
-		SELECT id, name, duration_days, max_devices, base_price, is_active, price_stars, is_trial
+		SELECT id, name, duration_days, max_devices, base_price, is_active, is_trial
 		FROM subscription_plans
 		WHERE is_trial = true AND is_active = true
 		ORDER BY id
@@ -58,7 +58,7 @@ func (r *SubscriptionRepository) GetTrialPlan(ctx context.Context) (*model.Subsc
 	`
 	plan := &model.SubscriptionPlan{}
 	err := r.db.QueryRow(ctx, q).Scan(&plan.ID, &plan.Name, &plan.DurationDays, &plan.MaxDevices,
-		&plan.BasePrice, &plan.IsActive, &plan.PriceStars, &plan.IsTrial)
+		&plan.BasePrice, &plan.IsActive, &plan.IsTrial)
 	if err != nil {
 		return nil, fmt.Errorf("get trial plan: %w", err)
 	}
@@ -67,7 +67,7 @@ func (r *SubscriptionRepository) GetTrialPlan(ctx context.Context) (*model.Subsc
 
 func (r *SubscriptionRepository) GetDevicePricing(ctx context.Context, planID int32) ([]*model.DeviceAddonPricing, error) {
 	query := `
-		SELECT d.id, d.plan_id, d.max_devices, d.price, d.price_stars, p.name
+		SELECT d.id, d.plan_id, d.max_devices, d.price, p.name
 		FROM device_addon_pricing d
 		JOIN subscription_plans p ON p.id = d.plan_id
 		WHERE d.plan_id = $1
@@ -84,13 +84,28 @@ func (r *SubscriptionRepository) GetDevicePricing(ctx context.Context, planID in
 	for rows.Next() {
 		price := &model.DeviceAddonPricing{}
 		if err := rows.Scan(&price.ID, &price.PlanID, &price.MaxDevices, &price.Price,
-			&price.PriceStars, &price.PlanName); err != nil {
+			&price.PlanName); err != nil {
 			return nil, err
 		}
 		prices = append(prices, price)
 	}
 
 	return prices, nil
+}
+
+// GetRateToRub возвращает курс валюты к рублю.
+// 1 unit валюты = <rate> RUB. Используется для конвертации цен при сборке
+// proto-ответов (price_stars = ceil(base_price / rate_stars)).
+//
+// Для неизвестных валют возвращает ошибку — лучше сломаться явно чем показать
+// нулевую цену.
+func (r *SubscriptionRepository) GetRateToRub(ctx context.Context, currency string) (float64, error) {
+	const q = `SELECT rate_to_rub FROM currency_rates WHERE currency = $1`
+	var rate float64
+	if err := r.db.QueryRow(ctx, q, currency).Scan(&rate); err != nil {
+		return 0, fmt.Errorf("get rate for %s: %w", currency, err)
+	}
+	return rate, nil
 }
 
 // ExpireOverdueSubscriptions помечает active/trial-подписки с expires_at < NOW()

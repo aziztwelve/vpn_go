@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"math"
 
 	"github.com/vpn/subscription-service/internal/model"
 	"github.com/vpn/subscription-service/internal/service"
@@ -11,6 +12,18 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+// currencyStars — код "валюты" Telegram Stars в таблице currency_rates.
+const currencyStars = "STARS"
+
+// rubToStars переводит рублёвую цену в stars по курсу rateToRub
+// (1 Star = rateToRub RUB). Округление вверх чтобы не недополучить.
+func rubToStars(priceRub float64, rateToRub float64) int32 {
+	if rateToRub <= 0 {
+		return 0
+	}
+	return int32(math.Ceil(priceRub / rateToRub))
+}
 
 type SubscriptionAPI struct {
 	pb.UnimplementedSubscriptionServiceServer
@@ -32,9 +45,15 @@ func (a *SubscriptionAPI) ListPlans(ctx context.Context, req *pb.ListPlansReques
 		return nil, status.Error(codes.Internal, "failed to list plans")
 	}
 
+	starsRate, err := a.service.GetRateToRub(ctx, currencyStars)
+	if err != nil {
+		a.logger.Error("Failed to load STARS rate", zap.Error(err))
+		return nil, status.Error(codes.Internal, "failed to load currency rate")
+	}
+
 	var pbPlans []*pb.SubscriptionPlan
 	for _, plan := range plans {
-		pbPlans = append(pbPlans, modelPlanToProto(plan))
+		pbPlans = append(pbPlans, modelPlanToProto(plan, starsRate))
 	}
 
 	return &pb.ListPlansResponse{Plans: pbPlans}, nil
@@ -51,12 +70,18 @@ func (a *SubscriptionAPI) GetDevicePricing(ctx context.Context, req *pb.GetDevic
 		return nil, status.Error(codes.Internal, "failed to get pricing")
 	}
 
+	starsRate, err := a.service.GetRateToRub(ctx, currencyStars)
+	if err != nil {
+		a.logger.Error("Failed to load STARS rate", zap.Error(err))
+		return nil, status.Error(codes.Internal, "failed to load currency rate")
+	}
+
 	var pbPrices []*pb.DevicePrice
 	for _, price := range prices {
 		pbPrices = append(pbPrices, &pb.DevicePrice{
 			MaxDevices: price.MaxDevices,
 			Price:      fmt.Sprintf("%.2f", price.Price),
-			PriceStars: price.PriceStars,
+			PriceStars: rubToStars(price.Price, starsRate),
 			PlanName:   price.PlanName,
 		})
 	}
@@ -196,7 +221,10 @@ func (a *SubscriptionAPI) StartTrial(ctx context.Context, req *pb.StartTrialRequ
 	}, nil
 }
 
-func modelPlanToProto(plan *model.SubscriptionPlan) *pb.SubscriptionPlan {
+// modelPlanToProto — билдер proto из доменной модели.
+// starsRate передаётся извне (один раз на запрос, чтобы не ходить в БД
+// на каждый план) и используется для вычисления PriceStars = ceil(rub / rate).
+func modelPlanToProto(plan *model.SubscriptionPlan, starsRate float64) *pb.SubscriptionPlan {
 	return &pb.SubscriptionPlan{
 		Id:           plan.ID,
 		Name:         plan.Name,
@@ -204,7 +232,7 @@ func modelPlanToProto(plan *model.SubscriptionPlan) *pb.SubscriptionPlan {
 		MaxDevices:   plan.MaxDevices,
 		BasePrice:    fmt.Sprintf("%.2f", plan.BasePrice),
 		IsActive:     plan.IsActive,
-		PriceStars:   plan.PriceStars,
+		PriceStars:   rubToStars(plan.BasePrice, starsRate),
 		IsTrial:      plan.IsTrial,
 	}
 }

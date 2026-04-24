@@ -4,15 +4,16 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/vpn/payment-service/internal/api"
 	"github.com/vpn/payment-service/internal/config"
+	"github.com/vpn/payment-service/internal/provider"
+	"github.com/vpn/payment-service/internal/provider/telegram"
+	"github.com/vpn/payment-service/internal/provider/wata"
 	"github.com/vpn/payment-service/internal/repository"
 	"github.com/vpn/payment-service/internal/service"
 	"github.com/vpn/platform/pkg/closer"
-	"github.com/vpn/platform/pkg/telegram"
 	pb "github.com/vpn/shared/pkg/proto/payment/v1"
 	subpb "github.com/vpn/shared/pkg/proto/subscription/v1"
 	vpnpb "github.com/vpn/shared/pkg/proto/vpn/v1"
@@ -22,6 +23,7 @@ import (
 	"google.golang.org/grpc/reflection"
 )
 
+// App — новая версия приложения с поддержкой нескольких провайдеров.
 type App struct {
 	config     *config.Config
 	logger     *zap.Logger
@@ -70,7 +72,7 @@ func (a *App) initDB() error {
 }
 
 func (a *App) initGRPC() error {
-	// Подключаемся к соседям.
+	// Подключаемся к соседям
 	subConn, err := grpc.NewClient(a.config.Services.SubscriptionAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -87,57 +89,107 @@ func (a *App) initGRPC() error {
 	a.vpnConn = vpnConn
 	a.closer.Add(func(ctx context.Context) error { return vpnConn.Close() })
 
-	// Собираем сервис.
+	// Инициализируем провайдеры
+	providers := a.initProviders()
+
+	// Собираем сервис с провайдерами
 	repo := repository.New(a.db)
-	tg := telegram.New(a.config.Telegram.BotToken)
 	svc := service.New(
 		repo,
-		tg,
+		providers,
 		subpb.NewSubscriptionServiceClient(subConn),
 		vpnpb.NewVPNServiceClient(vpnConn),
-		a.config.Telegram.MiniAppURL,
 		a.logger,
 	)
+
+	// Создаём gRPC API
 	paymentAPI := api.New(svc, a.logger)
 
+	// Запускаем gRPC сервер
 	a.grpcServer = grpc.NewServer()
 	pb.RegisterPaymentServiceServer(a.grpcServer, paymentAPI)
 	reflection.Register(a.grpcServer)
 
-	a.closer.Add(func(ctx context.Context) error {
-		stopped := make(chan struct{})
-		go func() { a.grpcServer.GracefulStop(); close(stopped) }()
-		select {
-		case <-stopped:
-		case <-time.After(5 * time.Second):
-			a.grpcServer.Stop()
-		}
-		return nil
-	})
-
-	a.logger.Info("gRPC clients initialized",
-		zap.String("subscription", a.config.Services.SubscriptionAddr),
-		zap.String("vpn", a.config.Services.VPNAddr),
-	)
+	addr := fmt.Sprintf("%s:%d", a.config.GRPC.Host, a.config.GRPC.Port)
+	a.logger.Info("gRPC server initialized", zap.String("addr", addr))
 	return nil
+}
+
+func (a *App) initProviders() []provider.PaymentProvider {
+	var providers []provider.PaymentProvider
+
+	// Telegram Stars провайдер (всегда включён)
+	if a.config.Telegram.BotToken != "" {
+		telegramProvider, err := telegram.NewProvider(a.config.Telegram.BotToken, a.logger)
+		if err != nil {
+			a.logger.Error("failed to init telegram provider", zap.Error(err))
+		} else {
+			providers = append(providers, telegramProvider)
+			a.logger.Info("Telegram Stars provider initialized")
+		}
+	}
+
+	// YooMoney провайдер (опционально)
+	// TODO: добавить конфиг для YooMoney
+	// if a.config.YooMoney.WalletID != "" {
+	// 	yoomoneyProvider := yoomoney.NewProvider(
+	// 		a.config.YooMoney.WalletID,
+	// 		a.config.YooMoney.SecretKey,
+	// 		a.config.YooMoney.ReturnURL,
+	// 		a.config.YooMoney.NotifyURL,
+	// 		a.logger,
+	// 	)
+	// 	providers = append(providers, yoomoneyProvider)
+	// 	a.logger.Info("YooMoney provider initialized")
+	// }
+
+	// WATA H2H провайдер (опционально, управляется WATA_ENABLED).
+	if a.config.Wata.Enabled {
+		wataProvider := wata.NewProvider(wata.Config{
+			BaseURL:     a.config.Wata.BaseURL,
+			AccessToken: a.config.Wata.AccessToken,
+			SuccessURL:  a.config.Wata.SuccessURL,
+			FailURL:     a.config.Wata.FailURL,
+			LinkTTL:     a.config.Wata.LinkTTL,
+			Logger:      a.logger,
+		})
+		providers = append(providers, wataProvider)
+		a.logger.Info("WATA provider initialized",
+			zap.String("base_url", a.config.Wata.BaseURL),
+			zap.Duration("link_ttl", a.config.Wata.LinkTTL),
+		)
+	}
+
+	// ЮKassa провайдер (опционально)
+	// TODO: реализовать YooKassaProvider
+	// if a.config.YooKassa.ShopID != "" {
+	// 	yookassaProvider := yookassa.NewProvider(...)
+	// 	providers = append(providers, yookassaProvider)
+	// 	a.logger.Info("YooKassa provider initialized")
+	// }
+
+	return providers
 }
 
 func (a *App) Start() error {
 	addr := fmt.Sprintf("%s:%d", a.config.GRPC.Host, a.config.GRPC.Port)
-	listener, err := net.Listen("tcp", addr)
+	lis, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
-	a.logger.Info("Starting gRPC server", zap.String("addr", addr))
+
+	a.logger.Info("Payment Service started", zap.String("addr", addr))
+
 	go func() {
-		if err := a.grpcServer.Serve(listener); err != nil {
-			a.logger.Fatal("gRPC server error", zap.Error(err))
+		if err := a.grpcServer.Serve(lis); err != nil {
+			a.logger.Error("grpc serve error", zap.Error(err))
 		}
 	}()
+
 	return nil
 }
 
 func (a *App) Stop(ctx context.Context) error {
-	a.logger.Info("Stopping Payment Service...")
+	a.grpcServer.GracefulStop()
 	return a.closer.CloseAll(ctx)
 }

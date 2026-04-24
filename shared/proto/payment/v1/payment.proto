@@ -29,6 +29,10 @@ service PaymentService {
   // Обработать update от Telegram Bot API (pre_checkout_query / successful_payment /
   // refunded_payment). Вызывается из Gateway, который принимает webhook.
   rpc HandleTelegramUpdate(HandleTelegramUpdateRequest) returns (HandleTelegramUpdateResponse);
+
+  // Обработать webhook от любого провайдера (telegram_stars, yoomoney, yookassa).
+  // Вызывается из Gateway при получении уведомления от платёжной системы.
+  rpc HandleWebhook(HandleWebhookRequest) returns (HandleWebhookResponse);
 }
 
 // --- CreateInvoice ---
@@ -37,6 +41,8 @@ message CreateInvoiceRequest {
   int64 user_id = 1;
   int32 plan_id = 2;
   int32 max_devices = 3;
+  // Провайдер платежа: telegram_stars, yoomoney, yookassa
+  string provider = 4;
 }
 
 message CreateInvoiceResponse {
@@ -98,4 +104,20 @@ message Payment {
   string provider = 8;
   string created_at = 9;
   string paid_at = 10;  // может быть пустым
+}
+
+// --- HandleWebhook ---
+
+message HandleWebhookRequest {
+  // Провайдер платежа: telegram_stars, yoomoney, yookassa
+  string provider = 1;
+  // Сырые данные webhook (JSON или form data)
+  bytes payload = 2;
+  // Подпись для валидации (если есть)
+  string signature = 3;
+}
+
+message HandleWebhookResponse {
+  bool handled = 1;
+  string status = 2;  // для дебага: "paid", "cancelled", "failed", "ignored"
 }

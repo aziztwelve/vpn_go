@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/vpn/gateway/internal/client"
 	"go.uber.org/zap"
@@ -33,12 +34,18 @@ type CreateInvoiceRequest struct {
 	MaxDevices int32 `json:"max_devices"`
 }
 
-// CreateInvoice — POST /api/v1/payments (защищённая JWT).
-// Возвращает t.me/$... invoice_link; Mini App открывает через WebApp.openInvoice().
+// CreateInvoice — POST /api/v1/payments?provider=telegram_stars (защищённая JWT).
+// Возвращает invoice_link; Mini App открывает через WebApp.openInvoice() или в браузере.
 func (h *PaymentHandler) CreateInvoice(w http.ResponseWriter, r *http.Request) {
 	userID, ok := userIDFromRequest(w, r)
 	if !ok {
 		return
+	}
+
+	// Получаем провайдер из query parameter
+	provider := r.URL.Query().Get("provider")
+	if provider == "" {
+		provider = "telegram_stars" // по умолчанию
 	}
 
 	var req CreateInvoiceRequest
@@ -51,10 +58,12 @@ func (h *PaymentHandler) CreateInvoice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := h.paymentClient.CreateInvoice(r.Context(), userID, req.PlanID, req.MaxDevices)
+	resp, err := h.paymentClient.CreateInvoice(r.Context(), userID, req.PlanID, req.MaxDevices, provider)
 	if err != nil {
 		h.logger.Error("CreateInvoice failed",
-			zap.Int64("user_id", userID), zap.Error(err))
+			zap.Int64("user_id", userID),
+			zap.String("provider", provider),
+			zap.Error(err))
 		http.Error(w, "failed to create invoice", http.StatusInternalServerError)
 		return
 	}
@@ -64,6 +73,7 @@ func (h *PaymentHandler) CreateInvoice(w http.ResponseWriter, r *http.Request) {
 		"payment_id":   resp.PaymentId,
 		"invoice_link": resp.InvoiceLink,
 		"amount_stars": resp.AmountStars,
+		"provider":     provider,
 	})
 }
 
@@ -160,5 +170,67 @@ func (h *PaymentHandler) TelegramWebhook(w http.ResponseWriter, r *http.Request)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"ok":     true,
 		"action": resp.Action,
+	})
+}
+
+// HandleWebhook — POST /api/v1/payments/webhook/{provider} (ПУБЛИЧНАЯ!).
+// Универсальный обработчик webhook для всех провайдеров.
+// Провайдер определяется из URL path: /webhook/telegram, /webhook/yoomoney, /webhook/yookassa
+func (h *PaymentHandler) HandleWebhook(w http.ResponseWriter, r *http.Request) {
+	// Извлекаем провайдера из URL (последний сегмент)
+	// Например: /api/v1/payments/webhook/yoomoney → provider = yoomoney
+	pathParts := strings.Split(strings.TrimSuffix(r.URL.Path, "/"), "/")
+	if len(pathParts) == 0 {
+		http.Error(w, "provider not specified", http.StatusBadRequest)
+		return
+	}
+	provider := pathParts[len(pathParts)-1]
+
+	// Читаем body
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1 MiB
+	if err != nil {
+		http.Error(w, "failed to read body", http.StatusBadRequest)
+		return
+	}
+
+	// Получаем подпись из headers (разные провайдеры используют разные headers)
+	var signature string
+	switch provider {
+	case "telegram_stars":
+		signature = r.Header.Get("X-Telegram-Bot-Api-Secret-Token")
+	case "yoomoney":
+		// YooMoney передаёт подпись в теле запроса (sha1_hash)
+		signature = ""
+	case "yookassa":
+		// ЮKassa использует HTTP Basic Auth
+		signature = r.Header.Get("Authorization")
+	case "wata":
+		// WATA: RSA-SHA512 base64 в X-Signature
+		signature = r.Header.Get("X-Signature")
+	}
+
+	// Вызываем payment-service
+	resp, err := h.paymentClient.HandleWebhook(r.Context(), provider, body, signature)
+	if err != nil {
+		h.logger.Error("HandleWebhook failed",
+			zap.String("provider", provider),
+			zap.Error(err),
+			zap.Int("body_len", len(body)),
+		)
+		// 5xx → провайдер ретраит
+		http.Error(w, "webhook handler failed", http.StatusInternalServerError)
+		return
+	}
+
+	h.logger.Info("webhook processed",
+		zap.String("provider", provider),
+		zap.String("status", resp.Status),
+	)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":     true,
+		"status": resp.Status,
 	})
 }

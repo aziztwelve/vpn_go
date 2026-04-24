@@ -32,11 +32,12 @@ func (c *PaymentClient) Close() error {
 	return c.conn.Close()
 }
 
-func (c *PaymentClient) CreateInvoice(ctx context.Context, userID int64, planID, maxDevices int32) (*pb.CreateInvoiceResponse, error) {
+func (c *PaymentClient) CreateInvoice(ctx context.Context, userID int64, planID, maxDevices int32, provider string) (*pb.CreateInvoiceResponse, error) {
 	return c.client.CreateInvoice(ctx, &pb.CreateInvoiceRequest{
 		UserId:     userID,
 		PlanId:     planID,
 		MaxDevices: maxDevices,
+		Provider:   provider,
 	})
 }
 
@@ -51,5 +52,13 @@ func (c *PaymentClient) ListUserPayments(ctx context.Context, userID int64, limi
 func (c *PaymentClient) HandleTelegramUpdate(ctx context.Context, rawJSON []byte) (*pb.HandleTelegramUpdateResponse, error) {
 	return c.client.HandleTelegramUpdate(ctx, &pb.HandleTelegramUpdateRequest{
 		UpdateJson: rawJSON,
+	})
+}
+
+func (c *PaymentClient) HandleWebhook(ctx context.Context, provider string, payload []byte, signature string) (*pb.HandleWebhookResponse, error) {
+	return c.client.HandleWebhook(ctx, &pb.HandleWebhookRequest{
+		Provider:  provider,
+		Payload:   payload,
+		Signature: signature,
 	})
 }

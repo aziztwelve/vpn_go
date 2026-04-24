@@ -28,6 +28,11 @@ func (s *SubscriptionService) GetDevicePricing(ctx context.Context, planID int32
 	return s.repo.GetDevicePricing(ctx, planID)
 }
 
+// GetRateToRub — прозрачный pass-through к repo (см. currency_rates).
+func (s *SubscriptionService) GetRateToRub(ctx context.Context, currency string) (float64, error) {
+	return s.repo.GetRateToRub(ctx, currency)
+}
+
 func (s *SubscriptionService) CreateSubscription(ctx context.Context, userID int64, planID int32, maxDevices int32, totalPrice float64) (*model.Subscription, error) {
 	sub, err := s.repo.CreateSubscription(ctx, userID, planID, maxDevices, totalPrice)
 	if err != nil {

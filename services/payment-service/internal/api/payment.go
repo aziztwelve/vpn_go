@@ -27,14 +27,25 @@ func (a *PaymentAPI) CreateInvoice(ctx context.Context, req *pb.CreateInvoiceReq
 	if req.GetUserId() == 0 || req.GetPlanId() == 0 || req.GetMaxDevices() == 0 {
 		return nil, status.Error(codes.InvalidArgument, "user_id, plan_id, max_devices required")
 	}
-	p, link, err := a.svc.CreateInvoice(ctx, req.GetUserId(), req.GetPlanId(), req.GetMaxDevices())
+
+	// Провайдер по умолчанию - telegram_stars
+	provider := req.GetProvider()
+	if provider == "" {
+		provider = "telegram_stars"
+	}
+
+	p, link, err := a.svc.CreateInvoice(ctx, req.GetUserId(), req.GetPlanId(), req.GetMaxDevices(), provider)
 	if err != nil {
 		if errors.Is(err, service.ErrInvalidPlan) {
 			return nil, status.Error(codes.InvalidArgument, err.Error())
 		}
+		if errors.Is(err, service.ErrUnknownProvider) {
+			return nil, status.Error(codes.InvalidArgument, "unknown provider: "+provider)
+		}
 		a.log.Error("CreateInvoice failed", zap.Error(err))
 		return nil, status.Error(codes.Internal, "failed to create invoice")
 	}
+
 	return &pb.CreateInvoiceResponse{
 		PaymentId:   p.ID,
 		InvoiceLink: link,
@@ -46,6 +57,7 @@ func (a *PaymentAPI) GetPayment(ctx context.Context, req *pb.GetPaymentRequest) 
 	if req.GetPaymentId() == 0 {
 		return nil, status.Error(codes.InvalidArgument, "payment_id required")
 	}
+
 	p, err := a.svc.GetPayment(ctx, req.GetPaymentId())
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
@@ -53,6 +65,7 @@ func (a *PaymentAPI) GetPayment(ctx context.Context, req *pb.GetPaymentRequest) 
 		}
 		return nil, status.Error(codes.Internal, "failed to get payment")
 	}
+
 	return &pb.GetPaymentResponse{Payment: toPB(p)}, nil
 }
 
@@ -60,14 +73,17 @@ func (a *PaymentAPI) ListUserPayments(ctx context.Context, req *pb.ListUserPayme
 	if req.GetUserId() == 0 {
 		return nil, status.Error(codes.InvalidArgument, "user_id required")
 	}
-	list, err := a.svc.ListByUser(ctx, req.GetUserId(), req.GetLimit(), req.GetOffset())
+
+	list, err := a.svc.ListPayments(ctx, req.GetUserId(), req.GetLimit(), req.GetOffset())
 	if err != nil {
 		return nil, status.Error(codes.Internal, "failed to list payments")
 	}
+
 	out := make([]*pb.Payment, 0, len(list))
 	for _, p := range list {
 		out = append(out, toPB(p))
 	}
+
 	return &pb.ListUserPaymentsResponse{Payments: out}, nil
 }
 
@@ -75,14 +91,44 @@ func (a *PaymentAPI) HandleTelegramUpdate(ctx context.Context, req *pb.HandleTel
 	if len(req.GetUpdateJson()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "update_json required")
 	}
-	action, err := a.svc.HandleUpdate(ctx, req.GetUpdateJson())
+
+	// Используем HandleWebhook для обратной совместимости
+	err := a.svc.HandleWebhook(ctx, "telegram_stars", req.GetUpdateJson(), "")
 	if err != nil {
-		a.log.Error("HandleUpdate failed", zap.String("action", action), zap.Error(err))
-		// Важно: возвращаем 200 для "duplicate" / "ignored" чтобы Telegram не ретраил.
-		// Только при реальных серверных ошибках — 5xx (чтобы Telegram повторил).
+		a.log.Error("HandleWebhook failed", zap.Error(err))
 		return nil, status.Error(codes.Internal, "update handler failed: "+err.Error())
 	}
-	return &pb.HandleTelegramUpdateResponse{Handled: true, Action: action}, nil
+
+	return &pb.HandleTelegramUpdateResponse{Handled: true, Action: "processed"}, nil
+}
+
+func (a *PaymentAPI) HandleWebhook(ctx context.Context, req *pb.HandleWebhookRequest) (*pb.HandleWebhookResponse, error) {
+	if req.GetProvider() == "" {
+		return nil, status.Error(codes.InvalidArgument, "provider required")
+	}
+	if len(req.GetPayload()) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "payload required")
+	}
+
+	err := a.svc.HandleWebhook(ctx, req.GetProvider(), req.GetPayload(), req.GetSignature())
+	if err != nil {
+		if errors.Is(err, service.ErrUnknownProvider) {
+			return nil, status.Error(codes.InvalidArgument, "unknown provider: "+req.GetProvider())
+		}
+
+		a.log.Error("HandleWebhook failed",
+			zap.String("provider", req.GetProvider()),
+			zap.Error(err),
+		)
+
+		// Возвращаем Internal error чтобы провайдер повторил запрос
+		return nil, status.Error(codes.Internal, "webhook handler failed")
+	}
+
+	return &pb.HandleWebhookResponse{
+		Handled: true,
+		Status:  "processed",
+	}, nil
 }
 
 func toPB(p *model.Payment) *pb.Payment {
@@ -96,11 +142,14 @@ func toPB(p *model.Payment) *pb.Payment {
 		Provider:    p.Provider,
 		CreatedAt:   p.CreatedAt.Format("2006-01-02T15:04:05Z"),
 	}
-	if p.ExternalID != nil {
-		out.ExternalId = *p.ExternalID
+
+	if p.ExternalID != "" {
+		out.ExternalId = p.ExternalID
 	}
+
 	if p.PaidAt != nil {
 		out.PaidAt = p.PaidAt.Format("2006-01-02T15:04:05Z")
 	}
+
 	return out
 }
