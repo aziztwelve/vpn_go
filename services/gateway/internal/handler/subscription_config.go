@@ -113,8 +113,8 @@ func (h *SubscriptionConfigHandler) SubscriptionConfig(w http.ResponseWriter, r 
 //   1) ⚡ Обычный VPN            ← на "лучший" сервер (min load_percent)
 //   2) 🚀 Обход блокировок       ← на тот же сервер
 //   3) 🎬 YouTube без рекламы    ← на тот же сервер
-//   4) 🇫🇮 Finland                ← прямая ссылка на сервер #1
-//   5) 🇩🇪 Germany                ← прямая ссылка на сервер #2 (если есть)
+//   4) 🇩🇪 Germany                ← прямая ссылка на сервер #1
+//   5) 🇫🇮 Finland                ← прямая ссылка на сервер #2 (если есть)
 //   ...
 //
 // Первые три — "режимы" (одинаковый outbound, разные remarks для UX-подсказки).
@@ -154,7 +154,7 @@ func writeBase64Format(w http.ResponseWriter, cfg *pb.GetSubscriptionConfigRespo
 //	encryption, type, security, flow, pbk, sid, sni, fp, spx.
 //
 // remarks передаётся целиком — вызывающий сам решает формат
-// (например "⚡ Обычный VPN · 🇫🇮 Finland" или "🇫🇮 Finland").
+// (например "⚡ Обычный VPN · 🇩🇪 Germany" или "🇩🇪 Germany").
 func buildVLESSLink(user *pb.VPNUser, srv *pb.Server, remarks string) string {
 	params := url.Values{}
 	params.Set("encryption", "none")
@@ -176,12 +176,12 @@ func buildVLESSLink(user *pb.VPNUser, srv *pb.Server, remarks string) string {
 	)
 }
 
-// profileRemark — формат remarks для режима: "⚡ Обычный VPN · 🇫🇮 Finland".
+// profileRemark — формат remarks для режима: "⚡ Обычный VPN · 🇩🇪 Germany".
 func profileRemark(p routingProfile, srv *pb.Server) string {
 	return fmt.Sprintf("%s · %s %s", p.label(), flagEmoji(srv.GetCountryCode()), srv.GetName())
 }
 
-// serverRemark — формат remarks для выбора конкретного сервера: "🇫🇮 Finland".
+// serverRemark — формат remarks для выбора конкретного сервера: "🇩🇪 Germany".
 func serverRemark(srv *pb.Server) string {
 	return fmt.Sprintf("%s %s", flagEmoji(srv.GetCountryCode()), srv.GetName())
 }

@@ -23,13 +23,13 @@ func fixtureUser() *pb.VPNUser {
 	}
 }
 
-// fixtureServer — Финляндия с Reality-параметрами.
+// fixtureServer — Германия (Hetzner FSN1) с Reality-параметрами.
 func fixtureServer() *pb.Server {
 	return &pb.Server{
 		Id:          1,
-		Name:        "Finland",
-		Location:    "Helsinki",
-		CountryCode: "FI",
+		Name:        "Germany",
+		Location:    "Falkenstein",
+		CountryCode: "DE",
 		Host:        "178.104.217.201",
 		Port:        8443,
 		PublicKey:   "Npb1GRjWa5dEHU0aTPyxQxN4YSnjNSiniwt1IBNOUn0",
@@ -43,7 +43,7 @@ func TestBuildVLESSLink(t *testing.T) {
 	user := fixtureUser()
 	srv := fixtureServer()
 
-	got := buildVLESSLink(user, srv, "🚀 Обход блокировок · 🇫🇮 Finland")
+	got := buildVLESSLink(user, srv, "🚀 Обход блокировок · 🇩🇪 Germany")
 
 	// Проверяем схему + user + host + port.
 	if !strings.HasPrefix(got, "vless://550e8400-e29b-41d4-a716-446655440000@178.104.217.201:8443?") {
@@ -84,7 +84,7 @@ func TestBuildVLESSLink(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unescape fragment: %v", err)
 	}
-	if frag != "🚀 Обход блокировок · 🇫🇮 Finland" {
+	if frag != "🚀 Обход блокировок · 🇩🇪 Germany" {
 		t.Errorf("fragment mismatch: got %q", frag)
 	}
 }
@@ -139,7 +139,7 @@ func TestFlagEmoji(t *testing.T) {
 func TestProfileRemark(t *testing.T) {
 	srv := fixtureServer()
 	got := profileRemark(profileBypass, srv)
-	want := "🚀 Обход блокировок · 🇫🇮 Finland"
+	want := "🚀 Обход блокировок · 🇩🇪 Germany"
 	if got != want {
 		t.Errorf("want %q, got %q", want, got)
 	}
@@ -148,7 +148,7 @@ func TestProfileRemark(t *testing.T) {
 func TestServerRemark(t *testing.T) {
 	srv := fixtureServer()
 	got := serverRemark(srv)
-	want := "🇫🇮 Finland"
+	want := "🇩🇪 Germany"
 	if got != want {
 		t.Errorf("want %q, got %q", want, got)
 	}
@@ -178,10 +178,10 @@ func TestBuildXrayConfig_Structure(t *testing.T) {
 			if !strings.Contains(remarks, p.label()) {
 				t.Errorf("remarks missing profile label %q: %s", p.label(), remarks)
 			}
-			if !strings.Contains(remarks, "Finland") {
+			if !strings.Contains(remarks, "Germany") {
 				t.Errorf("remarks missing server name: %s", remarks)
 			}
-			if !strings.Contains(remarks, "🇫🇮") {
+			if !strings.Contains(remarks, "🇩🇪") {
 				t.Errorf("remarks missing flag: %s", remarks)
 			}
 
