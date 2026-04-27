@@ -28,3 +28,4 @@
 - [07-fake-cdn-domain.md](./07-fake-cdn-domain.md) — ⏸ Отложено: фейк-CDN домен sbrf-cdn571.ru (Reality+sni=github.com уже решает задачу)
 - [08-ha-backend-mirror.md](./08-ha-backend-mirror.md) — ⏸ Отложено: HA backend с failover (зависит от 07)
 - [09-plans-v2.md](./09-plans-v2.md) — 🔵 `/plans.v2`: редизайн витрины тарифов + бизнес-фичи (промокоды, автопродление, trial-бэйдж, pending-flow)
+- [10-yoomoney-quickpay.md](./10-yoomoney-quickpay.md) — 🟢 ЮMoney Quickpay: приём картой ₽ через форму + HTTP-уведомления (без OAuth, fix существующих багов) — в работе

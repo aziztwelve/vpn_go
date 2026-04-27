@@ -4,6 +4,11 @@
 
 **Статус реализации:** 📋 **план** (не реализовано, но параметры уже зарегистрированы)
 
+> 📚 Полный API-референс ЮMoney по всем 22 страницам docs (auth, format, account-info,
+> history, payments, webhook, showcase) — в [yoomoney-api-reference.md](./yoomoney-api-reference.md).
+> Эта страница описывает только **наш** план интеграции; общие подробности и поля API
+> там.
+
 ---
 
 ## 🧠 Простыми словами
@@ -150,7 +155,69 @@
 
 ## 🔐 Проверка подписи HTTP-уведомлений
 
-ЮMoney подписывает каждый webhook sha1-хешем. Формула:
+> ⚠️ **Важное изменение:** старая подпись `sha1_hash` устарела и **перестанет
+> приходить с 18 мая 2026 года**. С момента старта реализации сразу пишем
+> код под новую подпись `sign` (HMAC-SHA256). Старый `sha1_hash` пока всё ещё
+> приходит, но валидируем его только как fallback (или не валидируем вовсе,
+> если код мержим уже после дедлайна).
+
+### Алгоритм `sign` (актуальный, HMAC-SHA256)
+
+`sign` — это HMAC-SHA256 в HEX (lowercase) от URL-кодированной строки
+параметров уведомления, отсортированных по алфавиту, **без** самого `sign`.
+
+Шаги:
+
+1. Извлечь все поля тела webhook.
+2. Удалить из множества поле `sign`.
+3. Отсортировать оставшиеся поля по имени по алфавиту (A-Z).
+4. URL-кодировать каждое значение (UTF-8, RFC 3986). Пустые значения остаются как `key=`.
+5. Соединить в строку формата `key=value`, разделитель — `&`.
+6. Посчитать `HMAC-SHA256(secret, signing_string)`, представить в HEX (lowercase).
+7. Сравнить со значением `sign` в **constant time**.
+
+`secret` — `YOOMONEY_NOTIFICATION_SECRET` из настроек кошелька
+(https://yoomoney.ru/transfer/myservices/http-notification, поле «Секрет»).
+
+Псевдокод проверки на Go:
+
+```go
+func verifyYoomoneyNotification(form url.Values, secret string) bool {
+    keys := make([]string, 0, len(form))
+    for k := range form {
+        if k == "sign" {
+            continue
+        }
+        keys = append(keys, k)
+    }
+    sort.Strings(keys)
+
+    var b strings.Builder
+    for i, k := range keys {
+        if i > 0 {
+            b.WriteByte('&')
+        }
+        b.WriteString(k)
+        b.WriteByte('=')
+        b.WriteString(url.QueryEscape(form.Get(k)))
+    }
+
+    mac := hmac.New(sha256.New, []byte(secret))
+    mac.Write([]byte(b.String()))
+    expected := hex.EncodeToString(mac.Sum(nil))
+
+    return subtle.ConstantTimeCompare([]byte(expected), []byte(form.Get("sign"))) == 1
+}
+```
+
+> ⚠️ ЮMoney в примерах URL-кодирует значения **точно так же**, как Go's
+> `url.QueryEscape`: пробел → `%20` через перекодирование (не `+`). Если
+> подпись не сходится — первое, что проверять, кодировку русских строк
+> (UTF-8) и формат пробелов.
+
+### Алгоритм `sha1_hash` (устаревший, до 18 мая 2026)
+
+Оставляю для случая, если интеграцию мержим до дедлайна и хотим dual-check:
 
 ```
 sha1_hash = sha1(
@@ -159,32 +226,20 @@ sha1_hash = sha1(
 )
 ```
 
-Где `&` — это **литеральный амперсанд** между значениями полей (не URL-разделитель).
+Где `&` — это **литеральный амперсанд** между значениями (не URL-разделитель).
+После 18 мая 2026 поле `sha1_hash` в webhook'ах вообще не будет приходить —
+весь `sha1`-код можно удалять.
 
-Псевдокод проверки:
+### Семантика ответа на webhook
 
-```go
-func verifyYoomoneyNotification(form url.Values, secret string) bool {
-    parts := []string{
-        form.Get("notification_type"),
-        form.Get("operation_id"),
-        form.Get("amount"),
-        form.Get("currency"),
-        form.Get("datetime"),
-        form.Get("sender"),
-        form.Get("codepro"),
-        secret,
-        form.Get("label"),
-    }
-    expected := fmt.Sprintf("%x", sha1.Sum([]byte(strings.Join(parts, "&"))))
-    return subtle.ConstantTimeCompare([]byte(expected), []byte(form.Get("sha1_hash"))) == 1
-}
-```
-
-**Важно:**
-- Если `sha1_hash` не сошёлся → `403 Forbidden`, не логируем как ошибку (это почти наверняка злоумышленник).
-- Если сошёлся, но `payment_id` не найден или `amount` не совпадает → `200 OK` + лог warning (ЮMoney всё равно не будет ретраить, а ошибка наша).
-- На любой **реальный** (успешно обработанный) webhook отвечаем `200 OK` **идемпотентно** — ЮMoney может прислать дубль при ретраях.
+- Подпись не сошлась → `403 Forbidden`, не логируем как `error` (это почти
+  наверняка злоумышленник).
+- Подпись сошлась, но `payment_id` (из `label`) не найден или `amount`
+  не совпадает → `200 OK` + лог `warning`. ЮMoney не будет ретраить, а
+  значит ошибка наша и разбираемся ручками.
+- Любой **реальный** (успешно обработанный) webhook → `200 OK`, обработка
+  **идемпотентная** — ЮMoney делает 3 попытки доставки (сразу, через 10
+  минут, через 1 час), при ретрае придёт дубль.
 
 ---
 
