@@ -75,7 +75,7 @@ func (h *SubscriptionConfigHandler) SubscriptionConfig(w http.ResponseWriter, r 
 	userInfo := fmt.Sprintf("upload=0; download=0; total=0; expire=%d", expireUnix)
 
 	// profile-title закодирован в base64 по HAPP-конвенции.
-	profileTitle := "base64:" + base64.StdEncoding.EncodeToString([]byte("OsmonAI VPN"))
+	profileTitle := "base64:" + base64.StdEncoding.EncodeToString([]byte("MaydaVpn"))
 	// filename используется клиентом как id подписки локально (нужен для
 	// корректного обновления — чтобы клиент не создавал дубликат).
 	// ASCII-only, без …/emoji — старые клиенты парсят HTTP-header строго.
