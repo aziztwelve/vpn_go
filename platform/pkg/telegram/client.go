@@ -139,13 +139,13 @@ type WebAppInfo struct {
 }
 
 // InlineKeyboardButton — одна из кнопок в инлайн-клавиатуре под сообщением.
-// Поддерживаем только подмножество: url + web_app; callback_data/switch_inline
-// не нужны для приветственного сообщения.
+// Поддерживаем: url, web_app, callback_data.
 // https://core.telegram.org/bots/api#inlinekeyboardbutton
 type InlineKeyboardButton struct {
-	Text   string      `json:"text"`
-	URL    string      `json:"url,omitempty"`
-	WebApp *WebAppInfo `json:"web_app,omitempty"`
+	Text         string      `json:"text"`
+	URL          string      `json:"url,omitempty"`
+	WebApp       *WebAppInfo `json:"web_app,omitempty"`
+	CallbackData string      `json:"callback_data,omitempty"`
 }
 
 // InlineKeyboardMarkup — двумерный массив кнопок (строки × колонки).
@@ -207,4 +207,66 @@ type SetWebhookParams struct {
 // SetWebhook — регистрирует вебхук. Вызывается one-off из deploy-скрипта.
 func (c *Client) SetWebhook(ctx context.Context, params SetWebhookParams) error {
 	return c.call(ctx, "setWebhook", params, nil)
+}
+
+// ============================================================
+// Callback Queries (inline button callbacks)
+// ============================================================
+
+// AnswerCallbackQueryParams — параметры для answerCallbackQuery.
+// https://core.telegram.org/bots/api#answercallbackquery
+type AnswerCallbackQueryParams struct {
+	CallbackQueryID string `json:"callback_query_id"`
+	Text            string `json:"text,omitempty"`
+	ShowAlert       bool   `json:"show_alert,omitempty"`
+	URL             string `json:"url,omitempty"`
+	CacheTime       int    `json:"cache_time,omitempty"`
+}
+
+// AnswerCallbackQuery — отвечает на callback_query от inline кнопки.
+// Обязательно вызвать в течение нескольких секунд, иначе у юзера будет крутиться loader.
+func (c *Client) AnswerCallbackQuery(ctx context.Context, params AnswerCallbackQueryParams) error {
+	return c.call(ctx, "answerCallbackQuery", params, nil)
+}
+
+// EditMessageTextParams — параметры для editMessageText.
+// https://core.telegram.org/bots/api#editmessagetext
+type EditMessageTextParams struct {
+	ChatID      int64                 `json:"chat_id,omitempty"`
+	MessageID   int64                 `json:"message_id,omitempty"`
+	Text        string                `json:"text"`
+	ParseMode   string                `json:"parse_mode,omitempty"`
+	ReplyMarkup *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
+}
+
+// EditMessageText — редактирует текст сообщения.
+func (c *Client) EditMessageText(ctx context.Context, params EditMessageTextParams) error {
+	return c.call(ctx, "editMessageText", params, nil)
+}
+
+// GetChatMemberParams — параметры для getChatMember.
+// https://core.telegram.org/bots/api#getchatmember
+type GetChatMemberParams struct {
+	ChatID string `json:"chat_id"` // @username или -100...
+	UserID int64  `json:"user_id"`
+}
+
+// ChatMember — информация о члене чата.
+// https://core.telegram.org/bots/api#chatmember
+type ChatMember struct {
+	Status string `json:"status"` // creator, administrator, member, restricted, left, kicked
+	User   struct {
+		ID        int64  `json:"id"`
+		FirstName string `json:"first_name"`
+		Username  string `json:"username,omitempty"`
+	} `json:"user"`
+}
+
+// GetChatMember — получает информацию о члене чата (для проверки подписки).
+func (c *Client) GetChatMember(ctx context.Context, params GetChatMemberParams) (*ChatMember, error) {
+	var member ChatMember
+	if err := c.call(ctx, "getChatMember", params, &member); err != nil {
+		return nil, err
+	}
+	return &member, nil
 }

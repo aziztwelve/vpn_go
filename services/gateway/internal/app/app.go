@@ -15,6 +15,7 @@ import (
 	gwmw "github.com/vpn/gateway/internal/middleware"
 	"github.com/vpn/platform/pkg/closer"
 	authmw "github.com/vpn/platform/pkg/middleware"
+	"github.com/vpn/platform/pkg/telegram"
 	"go.uber.org/zap"
 )
 
@@ -133,6 +134,11 @@ func (a *App) Start() error {
 	vpnHandler := handler.NewVPNHandler(a.vpnClient, a.logger)
 	paymentHandler := handler.NewPaymentHandler(a.paymentClient, a.config.Telegram.WebhookSecret, a.logger)
 	subscriptionConfigHandler := handler.NewSubscriptionConfigHandler(a.vpnClient, a.logger)
+	bonusHandler := handler.NewBonusHandler(a.subscriptionClient, a.logger, a.config.Telegram.BotToken, a.config.Telegram.ChannelUsername)
+
+	// Telegram Bot Handler для команд и callback'ов
+	telegramClient := telegram.New(a.config.Telegram.BotToken)
+	telegramBotHandler := handler.NewTelegramBotHandler(telegramClient, a.subscriptionClient, a.authClient, a.logger, a.config.Telegram.ChannelUsername)
 
 	// JWT middleware для защищённых ручек. Секрет — общий с Auth Service.
 	jwtMiddleware := authmw.JWTMiddleware(a.config.JWT.Secret)
@@ -167,6 +173,8 @@ func (a *App) Start() error {
 		// Telegram webhook — публичный, но защищён shared-секретом
 		// в заголовке X-Telegram-Bot-Api-Secret-Token (проверяется в handler'е).
 		r.Post("/telegram/webhook", paymentHandler.TelegramWebhook)
+		// Telegram Bot webhook для команд и callback'ов (например /bonus)
+		r.Post("/telegram/bot-webhook", telegramBotHandler.HandleBotWebhook)
 
 		// Универсальный webhook handler для всех провайдеров
 		// /api/v1/payments/webhook/telegram_stars
@@ -199,6 +207,10 @@ func (a *App) Start() error {
 			// Payments
 			r.Post("/payments", paymentHandler.CreateInvoice)
 			r.Get("/payments", paymentHandler.ListPayments)
+
+			// Channel Bonus
+			r.Post("/bonus/check-subscription", bonusHandler.CheckChannelSubscription)
+			r.Post("/bonus/claim", bonusHandler.ClaimChannelBonus)
 		})
 	})
 

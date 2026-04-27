@@ -115,6 +115,7 @@ services:
         condition: service_completed_successfully
       xray:
         condition: service_started
+    restart: always
     environment:
       GRPC_HOST: ${VPN_GRPC_HOST}
       GRPC_PORT: ${VPN_GRPC_PORT}
@@ -217,6 +218,10 @@ services:
       JWT_SECRET: ${AUTH_JWT_SECRET}
       # Shared secret для webhook'а от Telegram — тот же что у payment-service.
       TELEGRAM_WEBHOOK_SECRET: ${PAYMENT_TELEGRAM_WEBHOOK_SECRET}
+      # Telegram Bot Token для отправки сообщений (тот же что у auth-service).
+      TELEGRAM_BOT_TOKEN: ${AUTH_TELEGRAM_BOT_TOKEN}
+      # Telegram Channel Username для проверки подписки (/bonus).
+      TELEGRAM_CHANNEL_USERNAME: ${TELEGRAM_CHANNEL_USERNAME}
       # Публичный URL (Caddy edge), по которому клиенты Happ/Hiddify/V2RayNG
       # могут скачать подписку. Используется в /vpn/subscription-token для
       # построения subscription_url. Без этой env гейтвей вернул бы URL с

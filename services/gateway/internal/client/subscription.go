@@ -69,3 +69,7 @@ func (c *SubscriptionClient) GetSubscriptionHistory(ctx context.Context, userID 
 func (c *SubscriptionClient) StartTrial(ctx context.Context, userID int64) (*pb.StartTrialResponse, error) {
 	return c.client.StartTrial(ctx, &pb.StartTrialRequest{UserId: userID})
 }
+
+func (c *SubscriptionClient) ClaimChannelBonus(ctx context.Context, req *pb.ClaimChannelBonusRequest) (*pb.ClaimChannelBonusResponse, error) {
+	return c.client.ClaimChannelBonus(ctx, req)
+}

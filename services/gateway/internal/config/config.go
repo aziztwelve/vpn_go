@@ -22,7 +22,9 @@ type JWTConfig struct {
 // TelegramConfig — shared-секрет для валидации webhook'а от Telegram.
 // Должен совпадать с тем что передаётся в setWebhook `secret_token`.
 type TelegramConfig struct {
-	WebhookSecret string
+	WebhookSecret   string
+	BotToken        string
+	ChannelUsername string
 }
 
 type HTTPConfig struct {
@@ -62,7 +64,9 @@ func New() (*Config, error) {
 			Secret: getEnv("JWT_SECRET", ""),
 		},
 		Telegram: TelegramConfig{
-			WebhookSecret: getEnv("TELEGRAM_WEBHOOK_SECRET", ""),
+			WebhookSecret:   getEnv("TELEGRAM_WEBHOOK_SECRET", ""),
+			BotToken:        getEnv("TELEGRAM_BOT_TOKEN", ""),
+			ChannelUsername: getEnv("TELEGRAM_CHANNEL_USERNAME", "@maydavpn"),
 		},
 		Log: LogConfig{
 			Level: getEnv("LOG_LEVEL", "info"),
