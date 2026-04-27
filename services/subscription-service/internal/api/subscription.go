@@ -114,16 +114,20 @@ func (a *SubscriptionAPI) GetActiveSubscription(ctx context.Context, req *pb.Get
 		return nil, status.Error(codes.InvalidArgument, "user_id is required")
 	}
 
+	a.logger.Info("GetActiveSubscription called", zap.Int64("user_id", req.UserId))
+
 	sub, hasActive, err := a.service.GetActiveSubscription(ctx, req.UserId)
 	if err != nil {
-		a.logger.Error("Failed to get active subscription", zap.Error(err))
+		a.logger.Error("Failed to get active subscription", zap.Int64("user_id", req.UserId), zap.Error(err))
 		return nil, status.Error(codes.Internal, "failed to get subscription")
 	}
 
 	if !hasActive {
+		a.logger.Info("No active subscription found", zap.Int64("user_id", req.UserId))
 		return &pb.GetActiveSubscriptionResponse{HasActive: false}, nil
 	}
 
+	a.logger.Info("Active subscription found", zap.Int64("user_id", req.UserId), zap.Int64("sub_id", sub.ID))
 	return &pb.GetActiveSubscriptionResponse{
 		Subscription: modelSubscriptionToProto(sub),
 		HasActive:    true,
@@ -250,4 +254,35 @@ func modelSubscriptionToProto(sub *model.Subscription) *pb.Subscription {
 		Status:     sub.Status,
 		CreatedAt:  sub.CreatedAt.Format("2006-01-02T15:04:05Z"),
 	}
+}
+
+func (a *SubscriptionAPI) ClaimChannelBonus(ctx context.Context, req *pb.ClaimChannelBonusRequest) (*pb.ClaimChannelBonusResponse, error) {
+	if req.UserId == 0 {
+		return nil, status.Error(codes.InvalidArgument, "user_id is required")
+	}
+
+	sub, alreadyClaimed, noActiveSub, err := a.service.ClaimChannelBonus(ctx, req.UserId)
+	if err != nil {
+		a.logger.Error("Failed to claim channel bonus", zap.Int64("user_id", req.UserId), zap.Error(err))
+		return nil, status.Error(codes.Internal, "failed to claim channel bonus")
+	}
+
+	if alreadyClaimed {
+		return &pb.ClaimChannelBonusResponse{
+			Success:        false,
+			AlreadyClaimed: true,
+		}, nil
+	}
+
+	if noActiveSub {
+		return &pb.ClaimChannelBonusResponse{
+			Success:              false,
+			NoActiveSubscription: true,
+		}, nil
+	}
+
+	return &pb.ClaimChannelBonusResponse{
+		Success:      true,
+		Subscription: modelSubscriptionToProto(sub),
+	}, nil
 }

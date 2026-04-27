@@ -274,6 +274,7 @@ func (r *SubscriptionRepository) StartTrialTx(ctx context.Context, userID int64,
 
 func (r *SubscriptionRepository) GetActiveSubscription(ctx context.Context, userID int64) (*model.Subscription, error) {
 	// Триал считается активной подпиской — юзер с trial может пользоваться VPN.
+	// userID здесь это внутренний id из таблицы users
 	query := `
 		SELECT s.id, s.user_id, s.plan_id, sp.name, s.max_devices, s.total_price, 
 		       s.started_at, s.expires_at, s.status, s.created_at
@@ -390,4 +391,76 @@ func (r *SubscriptionRepository) GetSubscriptionHistory(ctx context.Context, use
 	}
 
 	return subs, nil
+}
+
+// ClaimChannelBonusTx атомарно начисляет +3 дня к активной подписке за подписку на канал.
+// Возвращает (sub, alreadyClaimed, noActiveSub, err).
+// alreadyClaimed=true — users.channel_bonus_claimed уже true, бонус не начислен.
+// noActiveSub=true — нет активной подписки для продления.
+func (r *SubscriptionRepository) ClaimChannelBonusTx(ctx context.Context, userID int64) (*model.Subscription, bool, bool, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, false, false, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Lock юзера и проверяем флаг channel_bonus_claimed
+	var bonusClaimed bool
+	if err := tx.QueryRow(ctx,
+		`SELECT channel_bonus_claimed FROM users WHERE telegram_id = $1 FOR UPDATE`,
+		userID,
+	).Scan(&bonusClaimed); err != nil {
+		return nil, false, false, fmt.Errorf("select user for update: %w", err)
+	}
+	if bonusClaimed {
+		return nil, true, false, nil
+	}
+
+	// Получаем активную подписку
+	var subID int64
+	var expiresAt time.Time
+	err = tx.QueryRow(ctx, `
+		SELECT id, expires_at
+		FROM subscriptions
+		WHERE user_id = $1 AND status IN ('active', 'trial') AND expires_at > NOW()
+		ORDER BY expires_at DESC
+		LIMIT 1
+	`, userID).Scan(&subID, &expiresAt)
+	if err != nil {
+		// Нет активной подписки
+		return nil, false, true, nil
+	}
+
+	// Продлеваем подписку на 3 дня
+	newExpires := expiresAt.Add(3 * 24 * time.Hour)
+	sub := &model.Subscription{}
+	err = tx.QueryRow(ctx, `
+		UPDATE subscriptions
+		SET expires_at = $1
+		WHERE id = $2
+		RETURNING id, user_id, plan_id, max_devices, total_price, started_at, expires_at, status, created_at
+	`, newExpires, subID).Scan(
+		&sub.ID, &sub.UserID, &sub.PlanID, &sub.MaxDevices, &sub.TotalPrice,
+		&sub.StartedAt, &sub.ExpiresAt, &sub.Status, &sub.CreatedAt,
+	)
+	if err != nil {
+		return nil, false, false, fmt.Errorf("update subscription: %w", err)
+	}
+
+	// Получаем имя плана
+	_ = tx.QueryRow(ctx, `SELECT name FROM subscription_plans WHERE id = $1`, sub.PlanID).Scan(&sub.PlanName)
+
+	// Отмечаем что бонус получен
+	if _, err := tx.Exec(ctx,
+		`UPDATE users SET channel_bonus_claimed = true, channel_bonus_claimed_at = NOW() WHERE telegram_id = $1`,
+		userID,
+	); err != nil {
+		return nil, false, false, fmt.Errorf("update channel_bonus_claimed: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, false, false, fmt.Errorf("commit: %w", err)
+	}
+
+	return sub, false, false, nil
 }

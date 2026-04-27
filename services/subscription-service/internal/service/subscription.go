@@ -127,3 +127,31 @@ func (s *SubscriptionService) StartTrial(ctx context.Context, userID int64) (*mo
 	)
 	return sub, false, nil
 }
+
+// ClaimChannelBonus начисляет +3 дня к активной подписке за подписку на канал.
+// Идемпотентно — если users.channel_bonus_claimed=true, возвращает alreadyClaimed=true.
+func (s *SubscriptionService) ClaimChannelBonus(ctx context.Context, userID int64) (*model.Subscription, bool, bool, error) {
+	sub, alreadyClaimed, noActiveSub, err := s.repo.ClaimChannelBonusTx(ctx, userID)
+	if err != nil {
+		return nil, false, false, err
+	}
+
+	if alreadyClaimed {
+		s.logger.Info("ClaimChannelBonus: already claimed",
+			zap.Int64("user_id", userID))
+		return nil, true, false, nil
+	}
+
+	if noActiveSub {
+		s.logger.Info("ClaimChannelBonus: no active subscription",
+			zap.Int64("user_id", userID))
+		return nil, false, true, nil
+	}
+
+	s.logger.Info("Channel bonus claimed",
+		zap.Int64("user_id", userID),
+		zap.Int64("subscription_id", sub.ID),
+		zap.Time("new_expires_at", sub.ExpiresAt),
+	)
+	return sub, false, false, nil
+}

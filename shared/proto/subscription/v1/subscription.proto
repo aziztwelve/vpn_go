@@ -33,6 +33,10 @@ service SubscriptionService {
   // Идемпотентно — если users.trial_used_at уже стоит, возвращает was_already_used=true
   // без создания дубликата.
   rpc StartTrial(StartTrialRequest) returns (StartTrialResponse);
+
+  // Начислить бонус за подписку на канал (+3 дня к активной подписке)
+  // Идемпотентно — если users.channel_bonus_claimed=true, возвращает already_claimed=true
+  rpc ClaimChannelBonus(ClaimChannelBonusRequest) returns (ClaimChannelBonusResponse);
 }
 
 message ListPlansRequest {
@@ -114,6 +118,17 @@ message StartTrialRequest {
 message StartTrialResponse {
   Subscription subscription = 1;
   bool was_already_used = 2; // true → юзер уже использовал триал, новая подписка не создана
+}
+
+message ClaimChannelBonusRequest {
+  int64 user_id = 1;
+}
+
+message ClaimChannelBonusResponse {
+  bool success = 1;
+  bool already_claimed = 2;  // true → бонус уже был получен ранее
+  bool no_active_subscription = 3;  // true → нет активной подписки для продления
+  Subscription subscription = 4;  // обновлённая подписка (если success=true)
 }
 
 message SubscriptionPlan {
