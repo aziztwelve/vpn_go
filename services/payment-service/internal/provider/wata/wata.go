@@ -1,17 +1,3 @@
-// Package wata — реализация PaymentProvider для WATA H2H API.
-//
-// Флоу:
-//  1. CreateInvoice → POST /links → получаем uuid-ссылку и url → редирект юзера.
-//     external_id = uuid ссылки. В orderId передаём payment.ID (для ручного
-//     поиска в ЛК WATA, и как fallback идентификатор на случай если
-//     payment_link удалится по TTL).
-//  2. Webhook приходит на gateway → forwardится в payment-service.
-//     Подпись — RSA-SHA512 в заголовке X-Signature (base64). Публичный
-//     ключ берём из /public-key, кэшируем на 24 часа.
-//  3. По transactionStatus маппим Paid → paid, Declined → failed.
-//     event.ExternalID = n.ID (link UUID) — по нему repo.GetByExternalID.
-//
-// См. docs/services/wata-integration.md.
 package wata
 
 import (
@@ -24,10 +10,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
+	"strconv"
 	"sync"
 	"time"
 
@@ -35,7 +22,11 @@ import (
 	"go.uber.org/zap"
 )
 
-// Config — параметры провайдера. Валидируется в config.go; сюда приходит готовым.
+// publicKeyTTL — как часто перезапрашиваем публичный ключ WATA.
+// Ключ редко меняется, но WATA рекомендует periodically refresh.
+const publicKeyTTL = 24 * time.Hour
+
+// Config — конфигурация Wata провайдера.
 type Config struct {
 	BaseURL     string
 	AccessToken string
@@ -45,63 +36,45 @@ type Config struct {
 	Logger      *zap.Logger
 }
 
-// Provider — реализация PaymentProvider для WATA.
-type Provider struct {
-	cfg        Config
-	httpClient *http.Client
+// WataProvider — провайдер для Wata.pro.
+type WataProvider struct {
+	baseURL     string
+	accessToken string
+	successURL  string
+	failURL     string
+	linkTTL     time.Duration
+	client      *http.Client
+	logger      *zap.Logger
 
-	// Кэш публичного ключа WATA (для верификации подписи webhook).
-	// WATA не ротирует ключ часто, но мы рефрешим раз в сутки на всякий.
-	pubKeyMu     sync.RWMutex
-	pubKey       *rsa.PublicKey
-	pubKeyExpiry time.Time
+	// Кэш публичного ключа для проверки RSA-подписи webhook'ов.
+	// Защищён mu; обновляется по TTL или при ошибке верификации.
+	mu             sync.RWMutex
+	publicKey      *rsa.PublicKey
+	publicKeyAt    time.Time
 }
 
-// Срок жизни кэша публичного ключа. Раз в сутки перечитываем.
-const pubKeyCacheTTL = 24 * time.Hour
-
-// NewProvider создаёт WATA-провайдер. Публичный ключ НЕ фетчится сразу —
-// ленивая инициализация при первом webhook (чтобы сервис поднимался даже
-// если WATA временно недоступен).
-func NewProvider(cfg Config) *Provider {
-	return &Provider{
-		cfg: cfg,
-		httpClient: &http.Client{
+// NewProvider создаёт новый Wata.pro провайдер.
+func NewProvider(cfg Config) *WataProvider {
+	return &WataProvider{
+		baseURL:     cfg.BaseURL,
+		accessToken: cfg.AccessToken,
+		successURL:  cfg.SuccessURL,
+		failURL:     cfg.FailURL,
+		linkTTL:     cfg.LinkTTL,
+		client: &http.Client{
 			Timeout: 30 * time.Second,
 		},
+		logger: cfg.Logger,
 	}
 }
 
-// Name — идентификатор провайдера (используется в URL-query ?provider=wata,
-// в колонке payments.provider и в /api/v1/payments/webhook/wata).
-func (p *Provider) Name() string { return "wata" }
-
-// ─────────────────────────────────────────────────────────────────────
-// CreateInvoice
-// ─────────────────────────────────────────────────────────────────────
-
-// createLinkRequest — тело POST /links.
-type createLinkRequest struct {
-	Type               string  `json:"type"`                         // "OneTime"
-	Amount             float64 `json:"amount"`                       // RUB
-	Currency           string  `json:"currency"`                     // "RUB"
-	Description        string  `json:"description,omitempty"`
-	OrderID            string  `json:"orderId,omitempty"`            // наш payment.ID как string
-	SuccessRedirectURL string  `json:"successRedirectUrl,omitempty"`
-	FailRedirectURL    string  `json:"failRedirectUrl,omitempty"`
-	ExpirationDateTime string  `json:"expirationDateTime,omitempty"` // RFC3339 UTC
+// Name возвращает имя провайдера.
+func (p *WataProvider) Name() string {
+	return "wata"
 }
 
-// createLinkResponse — ответ POST /links.
-type createLinkResponse struct {
-	ID                 string `json:"id"`   // UUID платёжной ссылки — наш ExternalID
-	URL                string `json:"url"`  // куда редиректим юзера
-	Status             string `json:"status"`
-	ExpirationDateTime string `json:"expirationDateTime"`
-}
-
-// CreateInvoice создаёт платёжную ссылку в WATA.
-func (p *Provider) CreateInvoice(ctx context.Context, req *provider.CreateInvoiceRequest) (*provider.Invoice, error) {
+// CreateInvoice создаёт платёж через Wata.pro.
+func (p *WataProvider) CreateInvoice(ctx context.Context, req *provider.CreateInvoiceRequest) (*provider.Invoice, error) {
 	if req.AmountRUB <= 0 {
 		return nil, &provider.ProviderError{
 			Provider: p.Name(),
@@ -110,145 +83,269 @@ func (p *Provider) CreateInvoice(ctx context.Context, req *provider.CreateInvoic
 		}
 	}
 
-	// orderId — наш payment.ID. service/payment.go кладёт его в Metadata["payment_id"].
-	orderID := req.Metadata["payment_id"]
+	// Генерируем уникальный orderId
+	orderId := fmt.Sprintf("payment_%d_%d_%d_%d", req.UserID, req.PlanID, req.MaxDevices, time.Now().Unix())
 
-	body := createLinkRequest{
-		Type:               "OneTime",
-		Amount:             req.AmountRUB,
-		Currency:           "RUB",
-		Description:        req.Description,
-		OrderID:            orderID,
-		SuccessRedirectURL: p.cfg.SuccessURL,
-		FailRedirectURL:    p.cfg.FailURL,
-		ExpirationDateTime: time.Now().UTC().Add(p.cfg.LinkTTL).Format(time.RFC3339),
+	// Формируем запрос к Wata API.
+	//
+	// type=ManyTime — по требованию техподдержки WATA. Семантически для
+	// одноразовой оплаты тарифа корректнее OneTime, но их sandbox-терминал
+	// `Maydavpnbot_test` отказывал в TRA_2999 даже на тестовой карте; поддержка
+	// прислала формат именно с ManyTime. После того как они починят терминал —
+	// стоит вернуть OneTime, чтобы исключить возможность повторных списаний
+	// по той же ссылке.
+	wataReq := map[string]interface{}{
+		"type":               "ManyTime",
+		"amount":             req.AmountRUB,
+		"currency":           "RUB",
+		"description":        req.Description,
+		"orderId":            orderId,
+		"successRedirectUrl": p.successURL,
+		"failRedirectUrl":    p.failURL,
+		"expirationDateTime": time.Now().Add(p.linkTTL).UTC().Format("2006-01-02T15:04:05.000Z"),
 	}
 
-	var resp createLinkResponse
-	if err := p.doJSON(ctx, http.MethodPost, "/links", body, &resp); err != nil {
+	body, err := json.Marshal(wataReq)
+	if err != nil {
 		return nil, &provider.ProviderError{
 			Provider: p.Name(),
-			Code:     "create_link_failed",
-			Message:  "failed to create payment link",
+			Code:     "marshal_error",
+			Message:  "failed to marshal request",
 			Err:      err,
 		}
 	}
 
-	if resp.ID == "" || resp.URL == "" {
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/links", bytes.NewReader(body))
+	if err != nil {
 		return nil, &provider.ProviderError{
 			Provider: p.Name(),
-			Code:     "invalid_response",
-			Message:  fmt.Sprintf("wata returned empty id/url: %+v", resp),
+			Code:     "request_error",
+			Message:  "failed to create request",
+			Err:      err,
 		}
 	}
 
-	p.cfg.Logger.Info("wata invoice created",
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+p.accessToken)
+
+	resp, err := p.client.Do(httpReq)
+	if err != nil {
+		return nil, &provider.ProviderError{
+			Provider: p.Name(),
+			Code:     "api_error",
+			Message:  "failed to call wata api",
+			Err:      err,
+		}
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, &provider.ProviderError{
+			Provider: p.Name(),
+			Code:     "read_error",
+			Message:  "failed to read response",
+			Err:      err,
+		}
+	}
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return nil, &provider.ProviderError{
+			Provider: p.Name(),
+			Code:     "api_error",
+			Message:  fmt.Sprintf("wata api error: status=%d body=%s", resp.StatusCode, string(respBody)),
+		}
+	}
+
+	var wataResp struct {
+		LinkId  string  `json:"id"`
+		Url     string  `json:"url"`
+		Amount  float64 `json:"amount"`
+		OrderId string  `json:"orderId"`
+		Status  string  `json:"status"`
+	}
+
+	if err := json.Unmarshal(respBody, &wataResp); err != nil {
+		return nil, &provider.ProviderError{
+			Provider: p.Name(),
+			Code:     "unmarshal_error",
+			Message:  "failed to unmarshal response",
+			Err:      err,
+		}
+	}
+
+	p.logger.Info("wata invoice created",
 		zap.Int64("user_id", req.UserID),
 		zap.Int32("plan_id", req.PlanID),
 		zap.Float64("amount_rub", req.AmountRUB),
-		zap.String("order_id", orderID),
-		zap.String("link_id", resp.ID),
+		zap.String("link_id", wataResp.LinkId),
+		zap.String("order_id", wataResp.OrderId),
 	)
 
-	// Парсим expiry — если не получится, берём now + LinkTTL.
-	expiresAt := time.Now().Add(p.cfg.LinkTTL)
-	if t, err := time.Parse(time.RFC3339, resp.ExpirationDateTime); err == nil {
-		expiresAt = t
-	}
-
 	return &provider.Invoice{
-		ExternalID:  resp.ID,
-		InvoiceLink: resp.URL,
+		ExternalID:  wataResp.LinkId,
+		InvoiceLink: wataResp.Url,
 		Amount:      req.AmountRUB,
 		Currency:    "RUB",
-		ExpiresAt:   expiresAt,
+		ExpiresAt:   time.Now().Add(p.linkTTL),
 	}, nil
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// GetPaymentStatus — для manual/fallback-сценария
-// ─────────────────────────────────────────────────────────────────────
-
-// getTxResponse — ответ GET /transactions/{id}. Нужны не все поля.
-type getTxResponse struct {
-	ID         string `json:"id"`
-	Status     string `json:"status"`     // Created|Pending|Paid|Declined
-	PaymentTime string `json:"paymentTime"`
-}
-
-// GetPaymentStatus не рекомендуется для polling (rate limit 1/30s) —
-// опираемся на webhook. Оставлена для manual-проверки админом.
-func (p *Provider) GetPaymentStatus(ctx context.Context, externalID string) (*provider.PaymentStatus, error) {
-	// externalID у нас = UUID платёжной ссылки. Ищем её транзакции через
-	// /transactions?paymentLinkIds=[uuid] — но проще поискать по orderId
-	// если знать payment.ID. Здесь идём по UUID ссылки:
-	var resp struct {
-		Items []getTxResponse `json:"items"`
-	}
-	path := fmt.Sprintf("/transactions?paymentLinkIds=%s", externalID)
-	if err := p.doJSON(ctx, http.MethodGet, path, nil, &resp); err != nil {
+// GetPaymentStatus проверяет статус платежа.
+func (p *WataProvider) GetPaymentStatus(ctx context.Context, externalID string) (*provider.PaymentStatus, error) {
+	// Wata.pro поддерживает проверку статуса через GET /api/h2h/links/{linkId}
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", p.baseURL+"/links/"+externalID, nil)
+	if err != nil {
 		return nil, &provider.ProviderError{
 			Provider: p.Name(),
-			Code:     "get_status_failed",
-			Message:  "failed to query transactions",
+			Code:     "request_error",
+			Message:  "failed to create request",
 			Err:      err,
 		}
 	}
 
-	if len(resp.Items) == 0 {
-		return &provider.PaymentStatus{ExternalID: externalID, Status: "pending"}, nil
-	}
+	httpReq.Header.Set("Authorization", "Bearer "+p.accessToken)
 
-	// Берём первую Paid, иначе последнюю (массив отсортирован по creationTime desc при дефолтной сортировке).
-	var tx *getTxResponse
-	for i := range resp.Items {
-		if resp.Items[i].Status == "Paid" {
-			tx = &resp.Items[i]
-			break
+	resp, err := p.client.Do(httpReq)
+	if err != nil {
+		return nil, &provider.ProviderError{
+			Provider: p.Name(),
+			Code:     "api_error",
+			Message:  "failed to get payment status",
+			Err:      err,
 		}
 	}
-	if tx == nil {
-		tx = &resp.Items[0]
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, &provider.ProviderError{
+			Provider: p.Name(),
+			Code:     "read_error",
+			Message:  "failed to read response",
+			Err:      err,
+		}
 	}
 
-	status := mapTransactionStatus(tx.Status)
-	ps := &provider.PaymentStatus{ExternalID: externalID, Status: status}
-	if t, err := time.Parse(time.RFC3339, tx.PaymentTime); err == nil && status == "paid" {
-		ps.PaidAt = &t
+	if resp.StatusCode != http.StatusOK {
+		return nil, &provider.ProviderError{
+			Provider: p.Name(),
+			Code:     "api_error",
+			Message:  fmt.Sprintf("wata api error: status=%d body=%s", resp.StatusCode, string(respBody)),
+		}
 	}
-	return ps, nil
+
+	var wataResp struct {
+		Status string `json:"status"`
+	}
+
+	if err := json.Unmarshal(respBody, &wataResp); err != nil {
+		return nil, &provider.ProviderError{
+			Provider: p.Name(),
+			Code:     "unmarshal_error",
+			Message:  "failed to unmarshal response",
+			Err:      err,
+		}
+	}
+
+	return &provider.PaymentStatus{
+		ExternalID: externalID,
+		Status:     wataResp.Status,
+	}, nil
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Webhook
-// ─────────────────────────────────────────────────────────────────────
+// HandleWebhook обрабатывает webhook от Wata.pro.
+func (p *WataProvider) HandleWebhook(ctx context.Context, payload []byte, signature string) (*provider.WebhookEvent, error) {
+	// Логируем RAW payload для отладки
+	p.logger.Info("wata webhook RAW payload", zap.String("payload", string(payload)))
 
-// webhookPayload — payload webhook от WATA.
-// См. docs/services/wata-integration.md "Пример payload".
-type webhookPayload struct {
-	TransactionType       string  `json:"transactionType"`    // CardCrypto | SBP | TPay | SberPay
-	Kind                  string  `json:"kind"`               // Payment | Refund
-	ID                    string  `json:"id"`                 // UUID платёжной ссылки
-	TransactionID         string  `json:"transactionId"`
-	OriginalTransactionID string  `json:"originalTransactionId"`
-	TransactionStatus     string  `json:"transactionStatus"`  // Created | Pending | Paid | Declined
-	TerminalPublicID      string  `json:"terminalPublicId"`
-	TerminalName          string  `json:"terminalName"`
-	Amount                float64 `json:"amount"`
-	Currency              string  `json:"currency"`
-	OrderID               string  `json:"orderId"`            // наш payment.ID как строка
-	OrderDescription      string  `json:"orderDescription"`
-	PaymentTime           string  `json:"paymentTime"`
-	Commission            float64 `json:"commission"`
-	Email                 string  `json:"email"`
-	PaymentLinkID         string  `json:"paymentLinkId"`
-	ErrorCode             string  `json:"errorCode"`
-	ErrorDescription      string  `json:"errorDescription"`
+	var webhook struct {
+		LinkId             string  `json:"paymentLinkId"`      // Wata использует paymentLinkId
+		OrderId            string  `json:"orderId"`
+		TransactionStatus  string  `json:"transactionStatus"`  // Wata использует transactionStatus вместо status
+		Amount             float64 `json:"amount"`
+		Currency           string  `json:"currency"`
+		PaymentTime        *string `json:"paymentTime"`        // Может быть null
+		TransactionId      string  `json:"transactionId"`
+	}
+
+	if err := json.Unmarshal(payload, &webhook); err != nil {
+		return nil, &provider.ProviderError{
+			Provider: p.Name(),
+			Code:     "invalid_payload",
+			Message:  "failed to unmarshal webhook",
+			Err:      err,
+		}
+	}
+
+	// Парсим orderId для получения данных платежа
+	// Формат: payment_{user_id}_{plan_id}_{max_devices}_{timestamp}
+	var userID, planID, maxDevices int64
+	_, err := fmt.Sscanf(webhook.OrderId, "payment_%d_%d_%d_%d", &userID, &planID, &maxDevices, new(int64))
+	if err != nil {
+		return nil, &provider.ProviderError{
+			Provider: p.Name(),
+			Code:     "invalid_order_id",
+			Message:  fmt.Sprintf("failed to parse orderId: %s", webhook.OrderId),
+			Err:      err,
+		}
+	}
+
+	// Формируем metadata
+	var paymentDate string
+	if webhook.PaymentTime != nil {
+		paymentDate = *webhook.PaymentTime
+	}
+
+	metadata := map[string]string{
+		"link_id":        webhook.LinkId,
+		"order_id":       webhook.OrderId,
+		"transaction_id": webhook.TransactionId,
+		"amount":         strconv.FormatFloat(webhook.Amount, 'f', 2, 64),
+		"currency":       webhook.Currency,
+		"payment_time":   paymentDate,
+	}
+
+	// Маппим статус Wata на наш статус
+	var status string
+	switch webhook.TransactionStatus {
+	case "Confirmed", "Authorized":
+		status = "paid"
+	case "Cancelled", "Declined":
+		status = "cancelled"
+	case "Created":
+		status = "pending"
+	default:
+		status = "pending"
+	}
+
+	p.logger.Info("wata webhook received",
+		zap.String("link_id", webhook.LinkId),
+		zap.String("order_id", webhook.OrderId),
+		zap.String("transaction_status", webhook.TransactionStatus),
+		zap.String("mapped_status", status),
+		zap.Float64("amount", webhook.Amount),
+	)
+
+	return &provider.WebhookEvent{
+		ExternalID: webhook.LinkId,
+		Status:     status,
+		UserID:     userID,
+		PlanID:     int32(planID),
+		MaxDevices: int32(maxDevices),
+		Metadata:   metadata,
+	}, nil
 }
 
-// ValidateWebhook проверяет RSA-SHA512 подпись webhook.
-// signature — значение заголовка X-Signature (base64).
-func (p *Provider) ValidateWebhook(payload []byte, signature string) error {
+// ValidateWebhook проверяет RSA-SHA512 подпись webhook от WATA.
+//
+// signature — base64-encoded RSA-SHA512 подпись raw body запроса
+// (header X-Signature). Публичный ключ забираем из GET /public-key
+// (PKCS1, PEM) и кешируем на publicKeyTTL.
+//
+// При несоответствии подписи возвращаем ошибку — gateway должен НЕ обрабатывать
+// payload и логировать инцидент.
+func (p *WataProvider) ValidateWebhook(payload []byte, signature string) error {
 	if signature == "" {
 		return &provider.ProviderError{
 			Provider: p.Name(),
@@ -261,231 +358,126 @@ func (p *Provider) ValidateWebhook(payload []byte, signature string) error {
 	if err != nil {
 		return &provider.ProviderError{
 			Provider: p.Name(),
-			Code:     "invalid_signature_encoding",
-			Message:  "signature is not valid base64",
+			Code:     "invalid_signature_b64",
+			Message:  "X-Signature is not valid base64",
 			Err:      err,
 		}
 	}
 
-	// Получаем публичный ключ (из кэша или свежий).
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	pub, err := p.getPublicKey(ctx)
+	pub, err := p.getPublicKey(context.Background(), false)
 	if err != nil {
 		return &provider.ProviderError{
 			Provider: p.Name(),
-			Code:     "public_key_fetch_failed",
-			Message:  "failed to fetch wata public key",
+			Code:     "public_key_unavailable",
+			Message:  "failed to get wata public key",
 			Err:      err,
 		}
 	}
 
 	hash := sha512.Sum512(payload)
 	if err := rsa.VerifyPKCS1v15(pub, crypto.SHA512, hash[:], sig); err != nil {
+		// Возможно, ключ ротировали — пробуем перезапросить и проверить ещё раз.
+		pub2, err2 := p.getPublicKey(context.Background(), true)
+		if err2 == nil && pub2 != nil && pub2.N.Cmp(pub.N) != 0 {
+			if err := rsa.VerifyPKCS1v15(pub2, crypto.SHA512, hash[:], sig); err == nil {
+				return nil
+			}
+		}
 		return &provider.ProviderError{
 			Provider: p.Name(),
-			Code:     "invalid_signature",
-			Message:  "webhook signature verification failed",
+			Code:     "signature_mismatch",
+			Message:  "wata webhook signature verification failed",
 			Err:      err,
 		}
 	}
 	return nil
 }
 
-// HandleWebhook парсит payload и возвращает событие.
-// Подпись уже проверена в ValidateWebhook (service/payment.go).
-func (p *Provider) HandleWebhook(ctx context.Context, payload []byte, signature string) (*provider.WebhookEvent, error) {
-	var n webhookPayload
-	if err := json.Unmarshal(payload, &n); err != nil {
-		return nil, &provider.ProviderError{
-			Provider: p.Name(),
-			Code:     "invalid_payload",
-			Message:  "failed to parse webhook json",
-			Err:      err,
+// getPublicKey возвращает RSA public key WATA, кешируя на publicKeyTTL.
+// force=true игнорирует кэш и запрашивает свежий ключ (для случая ротации).
+func (p *WataProvider) getPublicKey(ctx context.Context, force bool) (*rsa.PublicKey, error) {
+	if !force {
+		p.mu.RLock()
+		if p.publicKey != nil && time.Since(p.publicKeyAt) < publicKeyTTL {
+			pub := p.publicKey
+			p.mu.RUnlock()
+			return pub, nil
 		}
+		p.mu.RUnlock()
 	}
 
-	// Поддерживаем только Payment-webhook пока. Refund будем добавлять
-	// отдельно когда появится сценарий (UI/админка рефандов).
-	if n.Kind != "Payment" {
-		p.cfg.Logger.Info("wata webhook skipped (non-payment kind)",
-			zap.String("kind", n.Kind),
-			zap.String("transaction_id", n.TransactionID),
-		)
-		return nil, &provider.ProviderError{
-			Provider: p.Name(),
-			Code:     "unsupported_kind",
-			Message:  fmt.Sprintf("only Payment kind is supported, got %s", n.Kind),
-		}
+	pub, err := p.fetchPublicKey(ctx)
+	if err != nil {
+		return nil, err
 	}
 
-	if n.ID == "" {
-		return nil, &provider.ProviderError{
-			Provider: p.Name(),
-			Code:     "invalid_payload",
-			Message:  "payload.id (payment link uuid) is empty",
-		}
-	}
-
-	status := mapTransactionStatus(n.TransactionStatus)
-
-	p.cfg.Logger.Info("wata webhook received",
-		zap.String("kind", n.Kind),
-		zap.String("transaction_id", n.TransactionID),
-		zap.String("link_id", n.ID),
-		zap.String("order_id", n.OrderID),
-		zap.String("status", n.TransactionStatus),
-		zap.Float64("amount", n.Amount),
-		zap.String("currency", n.Currency),
-	)
-
-	return &provider.WebhookEvent{
-		ExternalID: n.ID, // = UUID платёжной ссылки (совпадает с payment.external_id)
-		Status:     status,
-		// UserID/PlanID/MaxDevices service.go возьмёт из payment'а по ExternalID.
-		Metadata: map[string]string{
-			"transaction_id":    n.TransactionID,
-			"transaction_type":  n.TransactionType,
-			"order_id":          n.OrderID,
-			"payment_time":      n.PaymentTime,
-			"error_code":        n.ErrorCode,
-			"error_description": n.ErrorDescription,
-		},
-	}, nil
+	p.mu.Lock()
+	p.publicKey = pub
+	p.publicKeyAt = time.Now()
+	p.mu.Unlock()
+	return pub, nil
 }
 
-// mapTransactionStatus переводит статус WATA в наш enum:
-//   Paid     → "paid"
-//   Declined → "failed"
-//   остальное (Created/Pending) → "pending" (не трогаем payment в БД)
-func mapTransactionStatus(s string) string {
-	switch s {
-	case "Paid":
-		return "paid"
-	case "Declined":
-		return "failed"
-	default:
-		return "pending"
+// fetchPublicKey запрашивает GET /public-key и парсит PEM.
+//
+// WATA возвращает ключ в PKCS1 (`-----BEGIN RSA PUBLIC KEY-----`) согласно их
+// доке, но мы поддерживаем оба формата (PKIX/SPKI тоже) — на случай если они
+// сменят формат, не упадём.
+func (p *WataProvider) fetchPublicKey(ctx context.Context) (*rsa.PublicKey, error) {
+	if ctx == nil {
+		ctx = context.Background()
 	}
-}
+	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 
-// ─────────────────────────────────────────────────────────────────────
-// HTTP-helpers
-// ─────────────────────────────────────────────────────────────────────
-
-// doJSON делает авторизованный JSON-запрос к WATA API.
-// При 4xx/5xx возвращает ошибку с телом для диагностики.
-func (p *Provider) doJSON(ctx context.Context, method, path string, body, out interface{}) error {
-	var reqBody io.Reader
-	if body != nil {
-		buf, err := json.Marshal(body)
-		if err != nil {
-			return fmt.Errorf("marshal body: %w", err)
-		}
-		reqBody = bytes.NewReader(buf)
-	}
-
-	url := strings.TrimRight(p.cfg.BaseURL, "/") + path
-	req, err := http.NewRequestWithContext(ctx, method, url, reqBody)
+	httpReq, err := http.NewRequestWithContext(reqCtx, "GET", p.baseURL+"/public-key", nil)
 	if err != nil {
-		return fmt.Errorf("new request: %w", err)
+		return nil, fmt.Errorf("create request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+p.cfg.AccessToken)
+	httpReq.Header.Set("Authorization", "Bearer "+p.accessToken)
 
-	resp, err := p.httpClient.Do(req)
+	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("do request: %w", err)
+		return nil, fmt.Errorf("call wata public-key: %w", err)
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("read response body: %w", err)
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("wata public-key status=%d body=%s", resp.StatusCode, string(body))
 	}
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("wata api %s %s: http %d: %s",
-			method, path, resp.StatusCode, strings.TrimSpace(string(respBody)))
+	var pkResp struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(body, &pkResp); err != nil {
+		return nil, fmt.Errorf("unmarshal public-key response: %w", err)
+	}
+	if pkResp.Value == "" {
+		return nil, errors.New("wata public-key response: empty value")
 	}
 
-	if out != nil && len(respBody) > 0 {
-		if err := json.Unmarshal(respBody, out); err != nil {
-			return fmt.Errorf("unmarshal response: %w (body: %s)", err, string(respBody))
-		}
-	}
-	return nil
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// Public key cache
-// ─────────────────────────────────────────────────────────────────────
-
-type publicKeyResponse struct {
-	Value string `json:"value"` // PEM-encoded (PKCS1)
-}
-
-// getPublicKey возвращает публичный ключ WATA, кешируя его на pubKeyCacheTTL.
-// Конкурентно-безопасно (RWMutex).
-func (p *Provider) getPublicKey(ctx context.Context) (*rsa.PublicKey, error) {
-	// Fast path — читаем из кэша под RLock.
-	p.pubKeyMu.RLock()
-	if p.pubKey != nil && time.Now().Before(p.pubKeyExpiry) {
-		key := p.pubKey
-		p.pubKeyMu.RUnlock()
-		return key, nil
-	}
-	p.pubKeyMu.RUnlock()
-
-	// Slow path — фетчим и парсим под Lock.
-	p.pubKeyMu.Lock()
-	defer p.pubKeyMu.Unlock()
-
-	// Double-check — вдруг уже обновили пока ждали Lock.
-	if p.pubKey != nil && time.Now().Before(p.pubKeyExpiry) {
-		return p.pubKey, nil
-	}
-
-	var resp publicKeyResponse
-	if err := p.doJSON(ctx, http.MethodGet, "/public-key", nil, &resp); err != nil {
-		return nil, fmt.Errorf("fetch public key: %w", err)
-	}
-
-	key, err := parsePKCS1PublicKey(resp.Value)
-	if err != nil {
-		return nil, fmt.Errorf("parse public key: %w", err)
-	}
-
-	p.pubKey = key
-	p.pubKeyExpiry = time.Now().Add(pubKeyCacheTTL)
-	p.cfg.Logger.Info("wata public key refreshed",
-		zap.Time("expires_at", p.pubKeyExpiry),
-	)
-	return key, nil
-}
-
-// parsePKCS1PublicKey декодирует PEM-блок и парсит его как PKCS1 public key
-// (так отдаёт WATA).
-func parsePKCS1PublicKey(pemStr string) (*rsa.PublicKey, error) {
-	block, _ := pem.Decode([]byte(pemStr))
+	block, _ := pem.Decode([]byte(pkResp.Value))
 	if block == nil {
-		return nil, fmt.Errorf("not a valid PEM block")
+		return nil, errors.New("wata public-key: failed to decode PEM")
 	}
 
-	// WATA возвращает "PUBLIC KEY" header, но содержимое — PKCS1
-	// (проверено в документации). Сначала пробуем PKCS1, потом PKIX
-	// как fallback на случай если формат поменяется.
-	if key, err := x509.ParsePKCS1PublicKey(block.Bytes); err == nil {
-		return key, nil
+	// PKCS1 — основной формат WATA. Если не парсится — пробуем PKIX.
+	if pub, err := x509.ParsePKCS1PublicKey(block.Bytes); err == nil {
+		p.logger.Info("wata public key fetched", zap.String("format", "PKCS1"))
+		return pub, nil
 	}
 	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
 	if err != nil {
-		return nil, fmt.Errorf("parse pkcs1/pkix: %w", err)
+		return nil, fmt.Errorf("parse public-key (tried PKCS1 and PKIX): %w", err)
 	}
-	rsaKey, ok := pub.(*rsa.PublicKey)
+	rsaPub, ok := pub.(*rsa.PublicKey)
 	if !ok {
-		return nil, fmt.Errorf("key is not rsa: got %T", pub)
+		return nil, fmt.Errorf("wata public-key is not RSA: %T", pub)
 	}
-	return rsaKey, nil
+	p.logger.Info("wata public key fetched", zap.String("format", "PKIX"))
+	return rsaPub, nil
 }
