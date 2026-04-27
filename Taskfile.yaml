@@ -127,44 +127,6 @@ tasks:
       - task: build:payment
       - task: build:gateway
 
-  # ==================== RUN FROM BINARY ====================
-
-  run-bin:auth:
-    desc: Run auth-service from binary (uses deploy/env/auth.env)
-    deps: [env:generate]
-    dotenv: ['{{.ENV_DIR}}/auth.env']
-    cmds:
-      - ./{{.BIN_DIR}}/auth-service
-
-  run-bin:sub:
-    desc: Run subscription-service from binary
-    deps: [env:generate]
-    dotenv: ['{{.ENV_DIR}}/sub.env']
-    cmds:
-      - ./{{.BIN_DIR}}/subscription-service
-
-  run-bin:vpn:
-    desc: Run vpn-service from binary
-    deps: [env:generate]
-    dotenv: ['{{.ENV_DIR}}/vpn.env']
-    cmds:
-      - ./{{.BIN_DIR}}/vpn-service
-
-  run-bin:gateway:
-    desc: Run gateway from binary
-    deps: [env:generate]
-    dotenv: ['{{.ENV_DIR}}/gateway.env']
-    cmds:
-      - ./{{.BIN_DIR}}/gateway
-
-  stop-all:
-    desc: Stop all locally running services
-    cmds:
-      - pkill -f "bin/gateway"              || true
-      - pkill -f "bin/auth-service"         || true
-      - pkill -f "bin/subscription-service" || true
-      - pkill -f "bin/vpn-service"          || true
-
   # ==================== PROTO ====================
 
   proto:install-plugins:
@@ -201,18 +163,20 @@ tasks:
         '
 
   # ==================== COMPOSE ====================
+  # MODE=dev (по умолчанию) — gateway опубликован на :8081, без caddy.
+  # MODE=prod                — только caddy:443 терминирует TLS, gateway внутри сети.
 
   compose:up:
-    desc: "Start full dev stack (dev override: gateway published on :8081, no caddy)"
+    desc: "Start full stack. MODE=dev (default) | prod"
     deps: [env:generate]
     cmds:
-      - docker compose -f {{.COMPOSE_FILE}} -f {{.COMPOSE_DEV_FILE}} --env-file {{.MASTER_ENV}} up -d --build
-
-  compose:up-prod:
-    desc: "Start prod stack (gateway only via caddy:443 — profile=prod)"
-    deps: [env:generate]
-    cmds:
-      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} --profile prod up -d --build
+      - |
+        MODE="{{.MODE | default "dev"}}"
+        if [ "$MODE" = "prod" ]; then
+          docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} --profile prod up -d --build
+        else
+          docker compose -f {{.COMPOSE_FILE}} -f {{.COMPOSE_DEV_FILE}} --env-file {{.MASTER_ENV}} up -d --build
+        fi
 
   compose:down:
     desc: Stop full stack (works for both dev and prod)
@@ -242,7 +206,7 @@ tasks:
   # ==================== XRAY ====================
 
   xray:up:
-    desc: Start only the Xray container (needs postgres network to exist → compose:up первее, либо task xray:up поднимет весь стек)
+    desc: Start only the Xray container (требует уже поднятой compose-сети — сначала task compose:up)
     deps: [env:generate]
     cmds:
       - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} up -d xray
@@ -275,11 +239,6 @@ tasks:
     cmds:
       - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} up -d postgres
 
-  db:down:
-    desc: Stop PostgreSQL (and the whole stack)
-    cmds:
-      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} down
-
   db:psql:
     desc: Open psql shell in the running postgres container
     dotenv: ['{{.MASTER_ENV}}']
@@ -287,40 +246,40 @@ tasks:
       - docker exec -it vpn-postgres psql -U ${POSTGRES_USER} -d ${POSTGRES_DB}
 
   # ==================== MIGRATIONS ====================
-  # Uses golang-migrate via docker. Stack must be running (task db:up).
+  # Используют compose-сервис `migrate` (см. docker-compose.yml). Сеть/volume
+  # имена больше не хардкодим — compose сам резолвит project name.
+  # Стек должен быть поднят как минимум до postgres (task db:up или compose:up).
 
   migrate:up:
-    desc: Apply all migrations (auth → subscription → vpn) using per-service schema_migrations tables
-    dotenv: ['{{.MASTER_ENV}}']
+    desc: Apply all migrations (auth → subscription → vpn → payment)
+    deps: [env:generate]
     cmds:
-      - |
-        for svc in auth subscription vpn; do
-          docker run --rm \
-            --network vpn-stack_vpn \
-            -v "$PWD/{{.SERVICES_DIR}}/$svc-service/migrations":/m \
-            migrate/migrate:4 \
-            -path /m \
-            -database "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable&x-migrations-table=${svc}_schema_migrations" \
-            up || exit 1;
-        done
+      # `up migrate` пересоздаёт one-shot контейнер с дефолтным entrypoint,
+      # который проходится по всем 4 сервисам и применяет миграции.
+      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} up --force-recreate migrate
 
   migrate:down:
-    desc: Roll back all migrations (vpn → subscription → auth)
+    desc: Roll back all migrations (payment → vpn → subscription → auth)
+    deps: [env:generate]
     dotenv: ['{{.MASTER_ENV}}']
     cmds:
+      # Используем тот же образ migrate/migrate:4 что и compose-сервис, через
+      # `compose run` — это даёт правильную сеть и volumes без хардкода.
+      # Креды передаём через -e (host-side dotenv) чтобы не мучиться с экранированием.
       - |
-        for svc in vpn subscription auth; do
-          docker run --rm \
-            --network vpn-stack_vpn \
-            -v "$PWD/{{.SERVICES_DIR}}/$svc-service/migrations":/m \
-            migrate/migrate:4 \
-            -path /m \
-            -database "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable&x-migrations-table=${svc}_schema_migrations" \
-            down -all || exit 1;
-        done
+        docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} run --rm \
+          -e DB_URL_BASE="postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable" \
+          --entrypoint sh migrate -c '
+            for svc in payment vpn subscription auth; do
+              echo ">>> rolling back $svc";
+              migrate -path /migrations/$svc \
+                -database "${DB_URL_BASE}&x-migrations-table=${svc}_schema_migrations" \
+                down -all || exit 1;
+            done
+          '
 
   # ==================== CADDY (public HTTPS edge) ====================
-  # Все таски требуют запущенного caddy-контейнера (task compose:up-prod).
+  # Все таски требуют запущенного caddy-контейнера (task compose:up MODE=prod).
 
   caddy:up:
     desc: Start only caddy (requires gateway to be up already)
@@ -341,7 +300,7 @@ tasks:
   caddy:logs:
     desc: Tail Caddy logs
     cmds:
-      - docker logs -f vpn-caddy
+      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} --profile prod logs -f caddy
 
   caddy:cert-info:
     desc: List issued certificates inside the caddy volume
@@ -361,7 +320,8 @@ tasks:
     cmds:
       - sed -i.bak '/^\s*acme_ca https:\/\/acme-staging/d' deploy/compose/caddy/Caddyfile
       - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} --profile prod down caddy
-      - docker volume rm vpn-stack_vpn_caddy_data
+      # Удаляем volume через compose чтобы не хардкодить vpn-stack_vpn_caddy_data.
+      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} --profile prod down -v caddy || true
       - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} --profile prod up -d caddy
       - echo "✅ Switched to LE prod. Tail logs with 'task caddy:logs' to watch cert issuance."
 
@@ -408,12 +368,17 @@ tasks:
   next:logs:
     desc: Tail vpn-next logs
     cmds:
-      - docker logs -f vpn-next
+      - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} --profile prod logs -f vpn-next
 
   # ==================== TELEGRAM BOT ====================
   # One-off операции над ботом: регистрация webhook и default menu-button.
   # Читают AUTH_TELEGRAM_BOT_TOKEN, API_DOMAIN, MINIAPP_URL, PAYMENT_TELEGRAM_WEBHOOK_SECRET
   # из master .env.
+  #
+  # ⚠️ В gateway есть два эндпоинта (/telegram/webhook и /telegram/bot-webhook),
+  # но Telegram даёт один webhook на бота. Сейчас регистрируем /telegram/webhook
+  # с allowed_updates на весь набор; bot-webhook — потенциально dead-code,
+  # это вопрос к gateway/handler-у, не к Taskfile.
 
   bot:info:
     desc: "Показать состояние бота (getMe + getWebhookInfo + menu-button)"
@@ -448,7 +413,7 @@ tasks:
           | python3 -m json.tool
 
   bot:set-webhook:
-    desc: "Зарегистрировать webhook Gateway'я с allowed_updates для message+pre_checkout_query"
+    desc: "Регистрирует webhook gateway'я с полным набором allowed_updates"
     dotenv: ['{{.MASTER_ENV}}']
     cmds:
       - |
@@ -461,9 +426,12 @@ tasks:
           exit 1
         fi
         echo "Регистрируем webhook → $URL"
+        # allowed_updates покрывает все три типа: команды/коллбэки/платежи.
+        # Раньше часть из них висела в отдельном setup_bot_webhook.sh с другим URL —
+        # тот скрипт удалён, единый источник правды теперь здесь.
         curl -s -X POST "https://api.telegram.org/bot$T/setWebhook" \
           -H "Content-Type: application/json" \
-          -d "{\"url\":\"$URL\",\"secret_token\":\"$SECRET\",\"allowed_updates\":[\"message\",\"pre_checkout_query\"],\"drop_pending_updates\":false}" \
+          -d "{\"url\":\"$URL\",\"secret_token\":\"$SECRET\",\"allowed_updates\":[\"message\",\"callback_query\",\"pre_checkout_query\"],\"drop_pending_updates\":false}" \
           | python3 -m json.tool
 
   bot:setup:
@@ -484,12 +452,8 @@ tasks:
   # ==================== UTIL ====================
 
   clean:
-    desc: Clean build artifacts (binaries + generated proto)
+    desc: Clean build artifacts (binaries + generated proto + per-service .env files)
     cmds:
       - rm -rf {{.BIN_DIR}}/*
       - rm -rf {{.PROTO_OUT_DIR}}/*
-
-  clean:env:
-    desc: Remove generated per-service .env files (keeps master .env and templates)
-    cmds:
-      - rm -f {{.ENV_DIR}}/auth.env {{.ENV_DIR}}/sub.env {{.ENV_DIR}}/vpn.env {{.ENV_DIR}}/gateway.env
+      - rm -f {{.ENV_DIR}}/auth.env {{.ENV_DIR}}/sub.env {{.ENV_DIR}}/vpn.env {{.ENV_DIR}}/payment.env {{.ENV_DIR}}/gateway.env
