@@ -88,7 +88,7 @@ if (callback_query.data === 'claim_bonus') {
 
 **Gateway** (`.env`):
 ```bash
-TELEGRAM_BOT_TOKEN=8511824444:AAFCtnMjG1n_mfv2OsXgAvHQtddWxp9Lnf4
+TELEGRAM_BOT_TOKEN=<bot-token-from-@BotFather>
 TELEGRAM_CHANNEL_USERNAME=@maydavpn
 ```
 
