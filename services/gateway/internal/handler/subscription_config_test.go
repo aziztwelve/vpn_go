@@ -30,7 +30,7 @@ func fixtureServer() *pb.Server {
 		Name:        "Finland",
 		Location:    "Helsinki",
 		CountryCode: "FI",
-		Host:        "204.168.248.33",
+		Host:        "178.104.217.201",
 		Port:        8443,
 		PublicKey:   "Npb1GRjWa5dEHU0aTPyxQxN4YSnjNSiniwt1IBNOUn0",
 		ShortId:     "e01417022de29ba0",
@@ -46,7 +46,7 @@ func TestBuildVLESSLink(t *testing.T) {
 	got := buildVLESSLink(user, srv, "🚀 Обход блокировок · 🇫🇮 Finland")
 
 	// Проверяем схему + user + host + port.
-	if !strings.HasPrefix(got, "vless://550e8400-e29b-41d4-a716-446655440000@204.168.248.33:8443?") {
+	if !strings.HasPrefix(got, "vless://550e8400-e29b-41d4-a716-446655440000@178.104.217.201:8443?") {
 		t.Errorf("unexpected prefix: %s", got)
 	}
 

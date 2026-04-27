@@ -36,9 +36,9 @@ Subscription-Userinfo: upload=0; download=0; total=10737418240; expire=0
 
 **Пример декодированного содержимого:**
 ```
-vless://550e8400-e29b-41d4-a716-446655440000@204.168.248.33:8443?flow=xtls-rprx-vision&fp=chrome&headerType=&host=&path=&pbk=Npb1GRjWa5dEHU0aTPyxQxN4YSnjNSiniwt1IBNOUn0&security=reality&sid=e01417022de29ba0&sni=github.com&type=tcp#🚀 Обход блокировок
-vless://550e8400-e29b-41d4-a716-446655440000@204.168.248.33:8443?flow=xtls-rprx-vision&fp=chrome&headerType=&host=&path=&pbk=Npb1GRjWa5dEHU0aTPyxQxN4YSnjNSiniwt1IBNOUn0&security=reality&sid=e01417022de29ba0&sni=github.com&type=tcp#🔒 Весь трафик
-vless://550e8400-e29b-41d4-a716-446655440000@204.168.248.33:8443?flow=xtls-rprx-vision&fp=chrome&headerType=&host=&path=&pbk=Npb1GRjWa5dEHU0aTPyxQxN4YSnjNSiniwt1IBNOUn0&security=reality&sid=e01417022de29ba0&sni=github.com&type=tcp#🎬 YouTube без рекламы
+vless://550e8400-e29b-41d4-a716-446655440000@178.104.217.201:8443?flow=xtls-rprx-vision&fp=chrome&headerType=&host=&path=&pbk=Npb1GRjWa5dEHU0aTPyxQxN4YSnjNSiniwt1IBNOUn0&security=reality&sid=e01417022de29ba0&sni=github.com&type=tcp#🚀 Обход блокировок
+vless://550e8400-e29b-41d4-a716-446655440000@178.104.217.201:8443?flow=xtls-rprx-vision&fp=chrome&headerType=&host=&path=&pbk=Npb1GRjWa5dEHU0aTPyxQxN4YSnjNSiniwt1IBNOUn0&security=reality&sid=e01417022de29ba0&sni=github.com&type=tcp#🔒 Весь трафик
+vless://550e8400-e29b-41d4-a716-446655440000@178.104.217.201:8443?flow=xtls-rprx-vision&fp=chrome&headerType=&host=&path=&pbk=Npb1GRjWa5dEHU0aTPyxQxN4YSnjNSiniwt1IBNOUn0&security=reality&sid=e01417022de29ba0&sni=github.com&type=tcp#🎬 YouTube без рекламы
 ```
 
 **Использование:**
@@ -87,7 +87,7 @@ vless://550e8400-e29b-41d4-a716-446655440000@204.168.248.33:8443?flow=xtls-rprx-
       "protocol": "vless",
       "settings": {
         "vnext": [{
-          "address": "204.168.248.33",
+          "address": "178.104.217.201",
           "port": 8443,
           "users": [{
             "id": "550e8400-e29b-41d4-a716-446655440000",
@@ -253,7 +253,7 @@ curl https://cdn.osmonai.com/api/v1/subscription/test?format=json | jq
 
 ### Не работает подключение
 - Проверьте параметры Reality (publicKey, shortId, sni)
-- Убедитесь что сервер доступен (204.168.248.33:8443)
+- Убедитесь что сервер доступен (178.104.217.201:8443)
 - Проверьте UUID пользователя
 
 ## См. также
