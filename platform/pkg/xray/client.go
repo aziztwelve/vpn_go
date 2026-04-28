@@ -110,6 +110,24 @@ func (c *Client) RemoveUser(ctx context.Context, inboundTag, email string) error
 	return nil
 }
 
+// Ping — health-check Xray gRPC API. Делает дешёвый QueryStats с
+// несовпадающим pattern'ом — Xray возвращает пустой список stats без ошибки,
+// если соединение живо. Если контейнер xray умер / TCP оборвался — gRPC
+// вернёт error.
+//
+// Используется ResyncCron для детекции рестартов Xray (он хранит юзеров
+// in-memory; после рестарта clients[] обнуляется и нужен ResyncServer).
+func (c *Client) Ping(ctx context.Context) error {
+	_, err := c.stats.QueryStats(ctx, &statscmd.QueryStatsRequest{
+		Pattern: "_xray_health_check_no_match_",
+		Reset_:  false,
+	})
+	if err != nil {
+		return fmt.Errorf("xray ping: %w", err)
+	}
+	return nil
+}
+
 // UserStats — трафик одного пользователя в байтах (с момента создания
 // или с момента последнего reset'а, если вызывали GetUserStats(reset=true)).
 type UserStats struct {

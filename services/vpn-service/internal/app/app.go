@@ -29,6 +29,7 @@ type App struct {
 	svc        *service.VPNService
 	heartbeat  *service.Heartbeat
 	loadCron   *service.LoadCron
+	resyncCron *service.ResyncCron // health-check + periodic resync; авто-восстановление clients[] после рестарта Xray
 	grpcServer *grpc.Server
 	closer     *closer.Closer
 }
@@ -184,6 +185,7 @@ func (a *App) initGRPC() error {
 	vpnAPI := api.NewVPNAPI(a.svc, a.logger)
 	a.heartbeat = service.NewHeartbeat(a.repo, a.xrayPool, a.logger)
 	a.loadCron = service.NewLoadCron(a.repo, a.logger)
+	a.resyncCron = service.NewResyncCron(a.repo, a.xrayPool, a.svc, a.logger)
 
 	a.grpcServer = grpc.NewServer()
 	pb.RegisterVPNServiceServer(a.grpcServer, vpnAPI)
@@ -235,6 +237,16 @@ func (a *App) Start() error {
 	// Делаем в фоне, чтобы gRPC-сервер успел подняться (здоровье важнее
 	// чем полный resync); ошибки не роняют сервис — можно дёрнуть ручкой.
 	go a.resyncAllServersOnStartup()
+
+	// ResyncCron: health-check Xray каждые 30с + periodic safety-net resync
+	// каждый час. Авто-восстановление после рестарта контейнера xray
+	// (детект транзишна unhealthy→healthy → ResyncServer).
+	resyncCtx, resyncCancel := context.WithCancel(context.Background())
+	a.closer.Add(func(ctx context.Context) error {
+		resyncCancel()
+		return nil
+	})
+	go a.resyncCron.Run(resyncCtx)
 
 	return nil
 }
