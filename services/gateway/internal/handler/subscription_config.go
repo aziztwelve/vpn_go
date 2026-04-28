@@ -85,7 +85,7 @@ func (h *SubscriptionConfigHandler) SubscriptionConfig(w http.ResponseWriter, r 
 	w.Header().Set("Subscription-Userinfo", userInfo)
 	w.Header().Set("Profile-Title", profileTitle)
 	w.Header().Set("Content-Disposition", "attachment; filename="+filename)
-	w.Header().Set("Support-URL", "https://t.me/maydavpnbot")
+	w.Header().Set("Support-URL", "https://t.me/maydavpn_support_bot")
 	w.Header().Set("Profile-Web-Page-URL", "https://cdn.osmonai.com")
 	// Happ всегда создаёт `freedom` outbound с тегом `fragment` — читает значения
 	// из этих заголовков и подставляет в Xray config как `fragment.length/packets/interval`.
