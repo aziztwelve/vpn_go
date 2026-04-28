@@ -2,7 +2,9 @@
 
 Как работает горизонтальное масштабирование: добавили новый Xray VPS → все юзеры автоматически получают к нему доступ без простоя.
 
-**Статус реализации:** ✅ **реализовано (backend), на MVP 1 сервер** (Этап 6, 2026-04-22)
+**Статус реализации:** ✅ **полностью работает, в проде 2 сервера** (Германия + Финляндия, 2026-04-28)
+
+> История: до 2026-04-28 в `vpn-service` был баг — `AddUser`/`RemoveUser` ходили в один локальный Xray независимо от `srv.XrayAPIHost`/`srv.XrayAPIPort` из БД. Subscription endpoint выдавал ссылки на все серверы, но новые/изменённые юзеры не попадали в их inbound. Фикс: `xray.Pool` (см. ниже) + восстановление SELECT'а `xray_api_host`/`xray_api_port` в `repository.ListServers`.
 
 ---
 
@@ -97,11 +99,38 @@
 
 ## ⚙️ Компоненты
 
-### 1. CreateVPNUser с partial success
+### 1. xray.Pool — гRPC-клиенты по `server_id`
+```go
+// platform/pkg/xray/pool.go
+type Pool struct {
+    mu      sync.RWMutex
+    clients map[int32]*Client  // key = vpn_servers.id
+}
+
+p.GetOrConnect(ctx, srv.ID, "host:port из БД")  // lazy create + double-check locking
+p.Get(srv.ID)                                    // read-only, без коннекта
+p.Remove(srv.ID)                                 // закрыть и убрать
+p.Close()                                        // shutdown — закрывает все
+```
+
+**Зачем:** до этого в `VPNService` был один `*xray.Client` на адрес из env (`XRAY_API_HOST:PORT`). Все `AddUser`/`RemoveUser` ходили в него независимо от того, по какому серверу из БД итерируешь. Multi-server-флоу был "виден" в Subscription, но не работал в управлении inbound'ами.
+
+Сейчас `VPNService` принимает `*xray.Pool`, и в каждом цикле по серверам:
+```go
+cli, err := s.pool.GetOrConnect(ctx, srv.ID, srv.XrayAPIHost+":"+srv.XrayAPIPort)
+if err != nil { /* log + continue, best-effort */ }
+cli.AddUser(ctx, srv.InboundTag, ...)
+```
+
+**Warm-up на старте:** `app.initXray()` после `NewPool()` зовёт `ListServers(active=true)` и для каждого делает `GetOrConnect`. Так мы видим в логах "xray pool warm-up: connected/unreachable" сразу при подъёме vpn-core, а не во время первого CreateVPNUser в продакшен-флоу.
+
+### 2. CreateVPNUser с partial success
 ```go
 // services/vpn-service/internal/service/vpn.go
 for each server in vpn_servers WHERE is_active:
-    xray.AddUser(inbound_tag, uuid, email, flow)
+    cli, err := pool.GetOrConnect(srv.ID, "host:port")
+    if err → failed++, log, continue
+    cli.AddUser(inbound_tag, uuid, email, flow)
         if "already exists" → treat as success
         if error → log, continue (не роняем запрос)
 
@@ -109,9 +138,24 @@ if servers_ok == 0 && len(servers) > 0:
     return error "failed on any server"
 ```
 
-**Почему так:** если 1 из 3 серверов недоступен, оплатившему юзеру важнее получить VLESS на 2 работающих, чем ждать пока 3-й починится. Незакрытый сервер восстанавливается при `ResyncServer`.
+**Почему так:** если 1 из 3 серверов недоступен, оплатившему юзеру важнее получить VLESS на 2 работающих, чем ждать пока 3-й починится. Незакрытый сервер восстанавливается при `ResyncServer` — pool сам ретраит коннект при следующем запросе.
 
-### 2. LoadCron (каждые 60с)
+### 3. Heartbeat — суммирует stats по всем серверам
+```go
+// services/vpn-service/internal/service/heartbeat.go
+for each user in ListAllVPNUsers:
+    var total int64
+    for each srv in ListServers(active=true):
+        cli := pool.Get(srv.ID) // или GetOrConnect lazy
+        stats, _ := cli.GetUserStats(email, reset=false)
+        total += stats.Uplink + stats.Downlink
+    if total > prev[email]:
+        UPDATE active_connections SET last_seen = NOW() WHERE vpn_user_id=…
+```
+
+**Зачем:** один UUID юзера прописан во ВСЕ Xray-инстансы. Если он ходит только через Finland-02, локальный Xray на Falkenstein не видит его трафика — без агрегации `last_seen` не обновится и device-limit-окно неправильно посчитает "активные устройства". Heartbeat теперь читает stats у каждого сервера через `pool.Get(srv.ID)` и складывает.
+
+### 4. LoadCron (каждые 60с)
 ```go
 // services/vpn-service/internal/service/load_cron.go
 for each server_id in ListActiveServerIDs:
@@ -122,21 +166,23 @@ for each server_id in ListActiveServerIDs:
         ))
 ```
 
-**Зачем:** UI показывает `load_percent` → юзер видит "Франкфурт 80%, Токио 20%" и выбирает менее нагруженный. Для балансировщика.
+**Зачем:** UI показывает `load_percent` → юзер видит "Франкфурт 80%, Токио 20%" и выбирает менее нагруженный. Для балансировщика. (LoadCron не использует pool — считает по `active_connections` в Postgres, который наполняет Heartbeat.)
 
-### 3. ResyncServer — добавление нового сервера
+### 5. ResyncServer — добавление нового сервера
 ```go
 // vpn-service.ResyncServer(server_id) gRPC
+srv := repo.GetServer(server_id)
+cli := pool.GetOrConnect(srv.ID, "host:port")
 for each user in vpn_users:
-    xray.AddUser на inbound_tag этого server
+    cli.AddUser на inbound_tag этого server
     "already exists" → idempotent skip
 ```
 
-**Зачем:** когда добавляется новый VPS, у Xray пустой `clients: []`. Чтобы существующие юзеры сразу им могли пользоваться, надо их все прописать.
+**Зачем:** когда добавляется новый VPS, у Xray пустой `clients: []`. Чтобы существующие юзеры сразу им могли пользоваться, надо их все прописать. Также вызывается **автоматически на старте vpn-core** для всех активных серверов — restartable safety.
 
-### 4. deploy-xray-new.sh
+### 6. deploy-xray-new.sh
 Скрипт генерирует:
-- Свежие Reality keys + short_id
+- Свежие Reality keys + short_id (важно — НЕ переиспользовать ключи между VPS)
 - `config.json` для нового VPS
 - SQL `INSERT INTO vpn_servers`
 - grpcurl команду `ResyncServer`
@@ -199,10 +245,15 @@ docker run --rm --network vpn-stack_vpn fullstorydev/grpcurl:latest \
 
 | Файл | Что |
 |---|---|
+| [`platform/pkg/xray/pool.go`](../../platform/pkg/xray/pool.go) | `xray.Pool` — thread-safe пул gRPC-клиентов по `server_id`, lazy connect, double-check locking |
+| [`platform/pkg/xray/pool_test.go`](../../platform/pkg/xray/pool_test.go) | Unit-тесты на pool (caching, multi-server, Remove, Close, bad addr) |
+| [`platform/pkg/xray/client.go`](../../platform/pkg/xray/client.go) | `xray.Client` — тонкая обёртка над Xray gRPC API (HandlerService + StatsService) |
 | [`services/vpn-service/migrations/003_add_server_capacity.up.sql`](../../services/vpn-service/migrations/003_add_server_capacity.up.sql) | `+server_max_connections INT DEFAULT 1000`, `+description` |
-| [`services/vpn-service/internal/service/vpn.go`](../../services/vpn-service/internal/service/vpn.go) | `CreateVPNUser` с best-effort partial success, `ResyncServer` |
+| [`services/vpn-service/internal/app/app.go`](../../services/vpn-service/internal/app/app.go) | `initXray` (NewPool + warm-up через ListServers), startup-resync |
+| [`services/vpn-service/internal/service/vpn.go`](../../services/vpn-service/internal/service/vpn.go) | `xrayClientForServer` helper; `CreateVPNUser`/`DisableVPNUser`/`ResyncServer` через pool |
+| [`services/vpn-service/internal/service/heartbeat.go`](../../services/vpn-service/internal/service/heartbeat.go) | Multi-server tick: для каждого юзера сумма stats по всем серверам |
 | [`services/vpn-service/internal/service/load_cron.go`](../../services/vpn-service/internal/service/load_cron.go) | LoadCron (тикер 60с) |
-| [`services/vpn-service/internal/repository/vpn.go`](../../services/vpn-service/internal/repository/vpn.go) | `UpdateServerLoad`, `ListActiveServerIDs`, Scan с новыми колонками |
+| [`services/vpn-service/internal/repository/vpn.go`](../../services/vpn-service/internal/repository/vpn.go) | `ListServers`/`GetServer` с `xray_api_host`/`xray_api_port`, `UpsertServerByHostPort` |
 | [`services/vpn-service/internal/api/vpn.go`](../../services/vpn-service/internal/api/vpn.go) | `ResyncServer` handler |
 | [`shared/proto/vpn/v1/vpn.proto`](../../shared/proto/vpn/v1/vpn.proto) | `+ResyncServer` RPC + `+ResyncServerRequest/Response` |
 | [`deploy/scripts/deploy-xray-new.sh`](../../deploy/scripts/deploy-xray-new.sh) | Скрипт добавления нового Xray VPS (генерация ключей → config.json → SQL + resync) |

@@ -40,16 +40,27 @@ var ErrDeviceLimitExceeded = errors.New("device limit exceeded")
 
 type VPNService struct {
 	repo   *repository.VPNRepository
-	xray   *xray.Client
+	pool   *xray.Pool
 	logger *zap.Logger
 }
 
-func NewVPNService(repo *repository.VPNRepository, xrayClient *xray.Client, logger *zap.Logger) *VPNService {
+func NewVPNService(repo *repository.VPNRepository, pool *xray.Pool, logger *zap.Logger) *VPNService {
 	return &VPNService{
 		repo:   repo,
-		xray:   xrayClient,
+		pool:   pool,
 		logger: logger,
 	}
+}
+
+// xrayClientForServer — достать или подключить gRPC-клиент к Xray API
+// конкретного сервера (xray_api_host:xray_api_port). Используется во всех
+// циклах по серверам для AddUser/RemoveUser.
+//
+// Ошибка соединения трактуется как "сервер недоступен" — вызывающий код
+// логирует её и идёт к следующему серверу (best-effort partial success).
+func (s *VPNService) xrayClientForServer(ctx context.Context, srv *model.VPNServer) (*xray.Client, error) {
+	addr := fmt.Sprintf("%s:%d", srv.XrayAPIHost, srv.XrayAPIPort)
+	return s.pool.GetOrConnect(ctx, srv.ID, addr)
 }
 
 // CreateVPNUser создаёт запись в БД и регистрирует юзера во ВСЕХ активных
@@ -86,7 +97,18 @@ func (s *VPNService) CreateVPNUser(ctx context.Context, userID, subscriptionID i
 
 	var succeeded, failed int
 	for _, srv := range servers {
-		if err := s.xray.AddUser(ctx, srv.InboundTag, userUUID, email, flow); err != nil {
+		cli, err := s.xrayClientForServer(ctx, srv)
+		if err != nil {
+			failed++
+			s.logger.Error("xray pool: connect failed — skipping server",
+				zap.Int64("user_id", userID),
+				zap.Int32("server_id", srv.ID),
+				zap.String("addr", fmt.Sprintf("%s:%d", srv.XrayAPIHost, srv.XrayAPIPort)),
+				zap.Error(err),
+			)
+			continue
+		}
+		if err := cli.AddUser(ctx, srv.InboundTag, userUUID, email, flow); err != nil {
 			if isAlreadyExists(err) {
 				s.logger.Warn("xray user already exists, treating as success",
 					zap.Int64("user_id", userID),
@@ -285,7 +307,15 @@ func (s *VPNService) DisableVPNUser(ctx context.Context, userID int64) (cleaned 
 	}
 
 	for _, srv := range servers {
-		if err := s.xray.RemoveUser(ctx, srv.InboundTag, vpnUser.Email); err != nil {
+		cli, err := s.xrayClientForServer(ctx, srv)
+		if err != nil {
+			s.logger.Error("xray pool: connect failed — skipping server for RemoveUser",
+				zap.Int64("user_id", userID),
+				zap.Int32("server_id", srv.ID),
+				zap.Error(err))
+			continue
+		}
+		if err := cli.RemoveUser(ctx, srv.InboundTag, vpnUser.Email); err != nil {
 			// "not found" — нормально (например при повторном вызове или при
 			// рестарте Xray с потерей in-memory clients). Логируем и идём дальше.
 			if isNotFound(err) {
@@ -343,9 +373,14 @@ func (s *VPNService) ResyncServer(ctx context.Context, serverID int32) (*ResyncR
 		return nil, fmt.Errorf("list vpn users: %w", err)
 	}
 
+	cli, err := s.xrayClientForServer(ctx, srv)
+	if err != nil {
+		return nil, fmt.Errorf("xray pool: connect server_id=%d: %w", serverID, err)
+	}
+
 	res := &ResyncResult{Total: int32(len(users))}
 	for _, u := range users {
-		if err := s.xray.AddUser(ctx, srv.InboundTag, u.UUID, u.Email, u.Flow); err != nil {
+		if err := cli.AddUser(ctx, srv.InboundTag, u.UUID, u.Email, u.Flow); err != nil {
 			if isAlreadyExists(err) {
 				res.AlreadyExist++
 				continue

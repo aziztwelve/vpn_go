@@ -20,7 +20,8 @@ func NewVPNRepository(db *pgxpool.Pool) *VPNRepository {
 // Servers
 func (r *VPNRepository) ListServers(ctx context.Context, activeOnly bool) ([]*model.VPNServer, error) {
 	query := `SELECT id, name, location, country_code, host, port, public_key, short_id, dest,
-		server_names, inbound_tag, is_active, load_percent, server_max_connections, description, created_at
+		server_names, xray_api_host, xray_api_port, inbound_tag, is_active, load_percent,
+		server_max_connections, description, created_at
 		FROM vpn_servers`
 	if activeOnly {
 		query += ` WHERE is_active = true`
@@ -37,7 +38,8 @@ func (r *VPNRepository) ListServers(ctx context.Context, activeOnly bool) ([]*mo
 	for rows.Next() {
 		server := &model.VPNServer{}
 		if err := rows.Scan(&server.ID, &server.Name, &server.Location, &server.CountryCode, &server.Host, &server.Port,
-			&server.PublicKey, &server.ShortID, &server.Dest, &server.ServerNames, &server.InboundTag,
+			&server.PublicKey, &server.ShortID, &server.Dest, &server.ServerNames,
+			&server.XrayAPIHost, &server.XrayAPIPort, &server.InboundTag,
 			&server.IsActive, &server.LoadPercent, &server.ServerMaxConnections, &server.Description,
 			&server.CreatedAt); err != nil {
 			return nil, err

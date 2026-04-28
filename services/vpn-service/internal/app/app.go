@@ -24,7 +24,7 @@ type App struct {
 	config     *config.Config
 	logger     *zap.Logger
 	db         *pgxpool.Pool
-	xray       *xray.Client
+	xrayPool   *xray.Pool // пул gRPC-клиентов по server_id; lazy-connect при первом запросе
 	repo       *repository.VPNRepository
 	svc        *service.VPNService
 	heartbeat  *service.Heartbeat
@@ -69,18 +69,49 @@ func New(logger *zap.Logger) (*App, error) {
 }
 
 func (a *App) initXray() error {
-	addr := fmt.Sprintf("%s:%d", a.config.Xray.APIHost, a.config.Xray.APIPort)
+	// Пул клиентов — по одному на каждый сервер из vpn_servers, key = server_id.
+	// Используется и для CreateVPNUser/RemoveUser/Resync, и для Heartbeat.
+	// Подключения lazy: создаются при первом GetOrConnect.
+	a.xrayPool = xray.NewPool()
+	a.closer.Add(func(ctx context.Context) error { return a.xrayPool.Close() })
+
+	// Warm-up: пробуем подключиться ко всем активным серверам сразу, чтобы
+	// fail-fast — если сервер недоступен, увидим в логе на старте, а не при
+	// первом запросе. Ошибки warm-up не фатальные: pool попробует снова при
+	// следующем запросе.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	cli, err := xray.New(ctx, addr)
-	if err != nil {
-		return fmt.Errorf("failed to connect to xray api at %s: %w", addr, err)
-	}
-	a.xray = cli
-	a.closer.Add(func(ctx context.Context) error { return cli.Close() })
-	a.logger.Info("Xray API connected", zap.String("addr", addr))
+	a.warmUpXrayPool(ctx)
 	return nil
+}
+
+// warmUpXrayPool — попытаться подключиться ко всем активным серверам из БД.
+// Это полезно для health-check'а: если сервер в БД, но Xray на нём лежит,
+// мы увидим warning в логе сразу, а не во время AddUser в продакшен-флоу.
+func (a *App) warmUpXrayPool(ctx context.Context) {
+	repo := repository.NewVPNRepository(a.db)
+	servers, err := repo.ListServers(ctx, true)
+	if err != nil {
+		a.logger.Warn("xray pool warm-up: list servers failed", zap.Error(err))
+		return
+	}
+	for _, srv := range servers {
+		addr := fmt.Sprintf("%s:%d", srv.XrayAPIHost, srv.XrayAPIPort)
+		if _, err := a.xrayPool.GetOrConnect(ctx, srv.ID, addr); err != nil {
+			a.logger.Warn("xray pool warm-up: server unreachable",
+				zap.Int32("server_id", srv.ID),
+				zap.String("name", srv.Name),
+				zap.String("addr", addr),
+				zap.Error(err),
+			)
+			continue
+		}
+		a.logger.Info("xray pool warm-up: connected",
+			zap.Int32("server_id", srv.ID),
+			zap.String("name", srv.Name),
+			zap.String("addr", addr),
+		)
+	}
 }
 
 // seedLocalServer — upsert-ит локальный Xray-сервер в vpn_servers при
@@ -149,9 +180,9 @@ func (a *App) initDB() error {
 
 func (a *App) initGRPC() error {
 	a.repo = repository.NewVPNRepository(a.db)
-	a.svc = service.NewVPNService(a.repo, a.xray, a.logger)
+	a.svc = service.NewVPNService(a.repo, a.xrayPool, a.logger)
 	vpnAPI := api.NewVPNAPI(a.svc, a.logger)
-	a.heartbeat = service.NewHeartbeat(a.repo, a.xray, a.logger)
+	a.heartbeat = service.NewHeartbeat(a.repo, a.xrayPool, a.logger)
 	a.loadCron = service.NewLoadCron(a.repo, a.logger)
 
 	a.grpcServer = grpc.NewServer()

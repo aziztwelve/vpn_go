@@ -29,6 +29,10 @@ go.work.sum
 # Generated Xray config (from config.json.template)
 deploy/compose/xray/config.json
 
+# Per-server Xray configs созданные deploy-xray-new.sh — содержат
+# приватные Reality keys, не должны попадать в git.
+deploy/compose/xray-new/
+
 # IDE
 .idea/
 .vscode/
