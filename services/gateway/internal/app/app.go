@@ -133,7 +133,7 @@ func (a *App) Start() error {
 	subscriptionHandler := handler.NewSubscriptionHandler(a.subscriptionClient, a.logger)
 	vpnHandler := handler.NewVPNHandler(a.vpnClient, a.logger)
 	paymentHandler := handler.NewPaymentHandler(a.paymentClient, a.config.Telegram.WebhookSecret, a.logger)
-	subscriptionConfigHandler := handler.NewSubscriptionConfigHandler(a.vpnClient, a.logger)
+	subscriptionConfigHandler := handler.NewSubscriptionConfigHandler(a.vpnClient, a.config.Subscription.DefaultCountry, a.logger)
 	bonusHandler := handler.NewBonusHandler(a.subscriptionClient, a.logger, a.config.Telegram.BotToken, a.config.Telegram.ChannelUsername)
 
 	// Telegram Bot Handler для команд и callback'ов

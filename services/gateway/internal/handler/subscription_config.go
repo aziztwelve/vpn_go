@@ -30,10 +30,20 @@ import (
 type SubscriptionConfigHandler struct {
 	vpnClient *client.VPNClient
 	logger    *zap.Logger
+	// defaultCountry — ISO-2 код страны (UPPERCASE) для «дефолтного» сервера
+	// в трёх режимах (⚡/🚀/🎬). Если в активных есть сервер с таким
+	// country_code — он используется для этих ссылок (вне зависимости от
+	// load_percent). Если такого сервера нет — fallback на servers[0]
+	// (наименее загруженный). Полный список стран в подписке не режется.
+	defaultCountry string
 }
 
-func NewSubscriptionConfigHandler(vpnClient *client.VPNClient, logger *zap.Logger) *SubscriptionConfigHandler {
-	return &SubscriptionConfigHandler{vpnClient: vpnClient, logger: logger}
+func NewSubscriptionConfigHandler(vpnClient *client.VPNClient, defaultCountry string, logger *zap.Logger) *SubscriptionConfigHandler {
+	return &SubscriptionConfigHandler{
+		vpnClient:      vpnClient,
+		logger:         logger,
+		defaultCountry: strings.ToUpper(strings.TrimSpace(defaultCountry)),
+	}
 }
 
 // SubscriptionConfig — точка входа HTTP.
@@ -103,7 +113,7 @@ func (h *SubscriptionConfigHandler) SubscriptionConfig(w http.ResponseWriter, r 
 		writeJSONFormat(w, cfg)
 		return
 	}
-	writeBase64Format(w, cfg)
+	writeBase64Format(w, cfg, h.defaultCountry)
 }
 
 // writeBase64Format — стандартный subscription-формат:
@@ -119,17 +129,23 @@ func (h *SubscriptionConfigHandler) SubscriptionConfig(w http.ResponseWriter, r 
 //
 // Первые три — "режимы" (одинаковый outbound, разные remarks для UX-подсказки).
 // Остальные — выбор конкретной страны/сервера (на случай нескольких VPS).
-// Сейчас `cfg.Servers` отсортирован репо-шкой по load_percent, так что
-// servers[0] это наименее загруженный → дефолт для первых 3 "режимов".
-func writeBase64Format(w http.ResponseWriter, cfg *pb.GetSubscriptionConfigResponse) {
+//
+// Дефолтный сервер для трёх режимов выбирается так:
+//  1. Если defaultCountry задан и в активных есть сервер с таким country_code —
+//     берём его (первый match), вне зависимости от load_percent.
+//  2. Иначе fallback на servers[0] (репо отдаёт отсортированным по load_percent,
+//     наименее нагруженный — первый).
+// Это даёт «закреплённую» страну для базового опыта: меньше сюрпризов когда
+// у юзера несколько локаций и хочется чтобы режимы всегда стартовали с одной.
+func writeBase64Format(w http.ResponseWriter, cfg *pb.GetSubscriptionConfigResponse, defaultCountry string) {
 	servers := cfg.GetServers()
 	user := cfg.GetVpnUser()
 
 	var sb strings.Builder
 
-	// Режимы — только на дефолтный (первый, наименее нагруженный) сервер.
+	// Режимы — на дефолтный сервер (см. doc-комментарий).
 	if len(servers) > 0 {
-		best := servers[0]
+		best := pickDefaultServer(servers, defaultCountry)
 		for _, p := range defaultProfiles {
 			sb.WriteString(buildVLESSLink(user, best, profileRemark(p, best)))
 			sb.WriteByte('\n')
@@ -459,6 +475,21 @@ func buildRouting(profile routingProfile) map[string]interface{} {
 }
 
 // --- helpers ---
+
+// pickDefaultServer возвращает «дефолтный» сервер для трёх режимов подписки.
+// Если country задан (UPPERCASE) и среди servers есть сервер с таким
+// country_code — возвращает его (первый match). Иначе — servers[0].
+// Вызывающий должен гарантировать len(servers) > 0.
+func pickDefaultServer(servers []*pb.Server, country string) *pb.Server {
+	if country != "" {
+		for _, s := range servers {
+			if strings.EqualFold(s.GetCountryCode(), country) {
+				return s
+			}
+		}
+	}
+	return servers[0]
+}
 
 // flagEmoji — ISO-код страны ("DE", "RU", "FI") → regional indicator эмоджи.
 // Возвращает 🏳 для неизвестных/пустых.

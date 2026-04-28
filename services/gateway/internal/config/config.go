@@ -7,11 +7,25 @@ import (
 )
 
 type Config struct {
-	HTTP     HTTPConfig
-	Services ServicesConfig
-	JWT      JWTConfig
-	Telegram TelegramConfig
-	Log      LogConfig
+	HTTP         HTTPConfig
+	Services     ServicesConfig
+	JWT          JWTConfig
+	Telegram     TelegramConfig
+	Log          LogConfig
+	Subscription SubscriptionConfig
+}
+
+// SubscriptionConfig — настройки публичной подписки.
+//
+// DefaultCountry: ISO-2 код страны (DE/FI/...) для «дефолтного» сервера
+// в трёх режимах (⚡ Обычный VPN / 🚀 Обход блокировок / 🎬 YouTube).
+// Если в активных есть сервер с таким country_code (case-insensitive)
+// — он используется для генерации этих трёх ссылок. Иначе fallback на
+// наименее загруженный сервер (servers[0]). Полный список стран в
+// подписке НЕ режется — юзер всегда может вручную выбрать другой
+// сервер из списка.
+type SubscriptionConfig struct {
+	DefaultCountry string
 }
 
 // JWTConfig — секрет общий с Auth Service (тот же HMAC-ключ).
@@ -70,6 +84,9 @@ func New() (*Config, error) {
 		},
 		Log: LogConfig{
 			Level: getEnv("LOG_LEVEL", "info"),
+		},
+		Subscription: SubscriptionConfig{
+			DefaultCountry: getEnv("SUBSCRIPTION_DEFAULT_COUNTRY", "DE"),
 		},
 	}, nil
 }
