@@ -128,6 +128,33 @@ func (s *SubscriptionService) StartTrial(ctx context.Context, userID int64) (*mo
 	return sub, false, nil
 }
 
+// ApplyBonusDays — начисляет days бонусных дней. Если активная подписка
+// есть → продлевает её. Если нет → накапливает в users.pending_bonus_days
+// до следующего CreateSubscription/StartTrial.
+//
+// Возвращает (sub, addedToPending, pendingTotal, err).
+func (s *SubscriptionService) ApplyBonusDays(ctx context.Context, userID int64, days int32) (*model.Subscription, bool, int32, error) {
+	sub, addedToPending, pending, err := s.repo.ApplyBonusDaysTx(ctx, userID, days)
+	if err != nil {
+		return nil, false, 0, err
+	}
+	if addedToPending {
+		s.logger.Info("Bonus days stored in pending",
+			zap.Int64("user_id", userID),
+			zap.Int32("days", days),
+			zap.Int32("pending_total", pending),
+		)
+		return nil, true, pending, nil
+	}
+	s.logger.Info("Bonus days applied to active subscription",
+		zap.Int64("user_id", userID),
+		zap.Int64("subscription_id", sub.ID),
+		zap.Int32("days", days),
+		zap.Time("new_expires_at", sub.ExpiresAt),
+	)
+	return sub, false, 0, nil
+}
+
 // ClaimChannelBonus начисляет +3 дня к активной подписке за подписку на канал.
 // Идемпотентно — если users.channel_bonus_claimed=true, возвращает alreadyClaimed=true.
 func (s *SubscriptionService) ClaimChannelBonus(ctx context.Context, userID int64) (*model.Subscription, bool, bool, error) {

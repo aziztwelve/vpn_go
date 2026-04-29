@@ -15,23 +15,34 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/vpn/auth-service/internal/model"
 	"github.com/vpn/auth-service/internal/repository"
+	referralpb "github.com/vpn/shared/pkg/proto/referral/v1"
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
 )
 
-type AuthService struct {
-	userRepo     *repository.UserRepository
-	jwtSecret    string
-	jwtTTLHours  int
-	telegramToken string
-	logger       *zap.Logger
+// ReferralClient — узкий интерфейс к referral-service. Может быть nil
+// (referral не задеплоен или адрес не настроен) — тогда вся реферальная
+// логика молча пропускается.
+type ReferralClient interface {
+	RegisterReferral(ctx context.Context, req *referralpb.RegisterReferralRequest, opts ...grpc.CallOption) (*referralpb.RegisterReferralResponse, error)
 }
 
-func NewAuthService(userRepo *repository.UserRepository, jwtSecret string, jwtTTLHours int, telegramToken string, logger *zap.Logger) *AuthService {
+type AuthService struct {
+	userRepo      *repository.UserRepository
+	jwtSecret     string
+	jwtTTLHours   int
+	telegramToken string
+	referral      ReferralClient // может быть nil
+	logger        *zap.Logger
+}
+
+func NewAuthService(userRepo *repository.UserRepository, jwtSecret string, jwtTTLHours int, telegramToken string, referral ReferralClient, logger *zap.Logger) *AuthService {
 	return &AuthService{
 		userRepo:      userRepo,
 		jwtSecret:     jwtSecret,
 		jwtTTLHours:   jwtTTLHours,
 		telegramToken: telegramToken,
+		referral:      referral,
 		logger:        logger,
 	}
 }
@@ -105,19 +116,27 @@ func (s *AuthService) ValidateTelegramInitData(initData string) (map[string]stri
 	return dataMap, nil
 }
 
+// ValidateResult — расширенный результат валидации с реферальной информацией.
+type ValidateResult struct {
+	User               *model.User
+	JWTToken           string
+	IsNewUser          bool
+	ReferralRegistered bool
+}
+
 // ValidateTelegramUser валидирует и создаёт/обновляет пользователя.
-// Возвращает (user, jwtToken, isNewUser, err). isNewUser=true — юзер только
-// что создан (Gateway использует этот флаг чтобы активировать trial).
-func (s *AuthService) ValidateTelegramUser(ctx context.Context, initData string) (*model.User, string, bool, error) {
+// Если refToken не пуст и юзер был только что создан — параллельно
+// регистрирует реферал (best-effort, ошибки не блокируют auth).
+func (s *AuthService) ValidateTelegramUser(ctx context.Context, initData, refToken string) (*ValidateResult, error) {
 	dataMap, err := s.ValidateTelegramInitData(initData)
 	if err != nil {
-		return nil, "", false, fmt.Errorf("validation failed: %w", err)
+		return nil, fmt.Errorf("validation failed: %w", err)
 	}
 
 	// Парсим user из JSON
 	userJSON, ok := dataMap["user"]
 	if !ok {
-		return nil, "", false, fmt.Errorf("user not found in init data")
+		return nil, fmt.Errorf("user not found in init data")
 	}
 
 	// Простой парсинг JSON (можно использовать encoding/json для более сложных случаев)
@@ -167,7 +186,7 @@ func (s *AuthService) ValidateTelegramUser(ctx context.Context, initData string)
 	}
 
 	if telegramID == 0 {
-		return nil, "", false, fmt.Errorf("invalid telegram_id")
+		return nil, fmt.Errorf("invalid telegram_id")
 	}
 
 	// Проверяем существует ли пользователь
@@ -177,7 +196,7 @@ func (s *AuthService) ValidateTelegramUser(ctx context.Context, initData string)
 		// Пользователь не найден, создаём нового
 		user, err = s.userRepo.CreateUser(ctx, telegramID, username, firstName, lastName, photoURL, langCode)
 		if err != nil {
-			return nil, "", false, fmt.Errorf("failed to create user: %w", err)
+			return nil, fmt.Errorf("failed to create user: %w", err)
 		}
 		isNewUser = true
 		s.logger.Info("New user created", zap.Int64("telegram_id", telegramID))
@@ -199,10 +218,53 @@ func (s *AuthService) ValidateTelegramUser(ctx context.Context, initData string)
 	// Генерируем JWT токен
 	token, err := s.GenerateJWT(user.ID, user.Role)
 	if err != nil {
-		return nil, "", false, fmt.Errorf("failed to generate JWT: %w", err)
+		return nil, fmt.Errorf("failed to generate JWT: %w", err)
 	}
 
-	return user, token, isNewUser, nil
+	// Реферальная регистрация — только для новых юзеров и только если есть
+	// токен и сконфигурирован клиент. Ошибки игнорируем (best-effort).
+	referralRegistered := false
+	if isNewUser && refToken != "" && s.referral != nil {
+		referralRegistered = s.tryRegisterReferral(ctx, refToken, user.ID)
+	}
+
+	return &ValidateResult{
+		User:               user,
+		JWTToken:           token,
+		IsNewUser:          isNewUser,
+		ReferralRegistered: referralRegistered,
+	}, nil
+}
+
+// tryRegisterReferral — best-effort вызов referral-service. Никогда не
+// блокирует и не падает — auth важнее реферала.
+func (s *AuthService) tryRegisterReferral(ctx context.Context, refToken string, invitedID int64) bool {
+	resp, err := s.referral.RegisterReferral(ctx, &referralpb.RegisterReferralRequest{
+		InviterToken:   refToken,
+		InvitedUserId:  invitedID,
+	})
+	if err != nil {
+		s.logger.Warn("referral.RegisterReferral failed (non-blocking)",
+			zap.String("ref_token", refToken),
+			zap.Int64("invited_id", invitedID),
+			zap.Error(err),
+		)
+		return false
+	}
+	if !resp.Registered {
+		s.logger.Info("referral registration skipped",
+			zap.String("ref_token", refToken),
+			zap.Int64("invited_id", invitedID),
+			zap.String("reason", resp.SkipReason),
+		)
+		return false
+	}
+	s.logger.Info("referral registered",
+		zap.String("ref_token", refToken),
+		zap.Int64("invited_id", invitedID),
+		zap.Int64("inviter_id", resp.InviterUserId),
+	)
+	return true
 }
 
 // GenerateJWT генерирует JWT токен

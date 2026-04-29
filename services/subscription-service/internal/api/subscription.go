@@ -256,6 +256,33 @@ func modelSubscriptionToProto(sub *model.Subscription) *pb.Subscription {
 	}
 }
 
+func (a *SubscriptionAPI) ApplyBonusDays(ctx context.Context, req *pb.ApplyBonusDaysRequest) (*pb.ApplyBonusDaysResponse, error) {
+	if req.UserId == 0 || req.Days <= 0 {
+		return nil, status.Error(codes.InvalidArgument, "user_id and positive days are required")
+	}
+
+	sub, addedToPending, pendingTotal, err := a.service.ApplyBonusDays(ctx, req.UserId, req.Days)
+	if err != nil {
+		a.logger.Error("ApplyBonusDays failed",
+			zap.Int64("user_id", req.UserId),
+			zap.Int32("days", req.Days),
+			zap.Error(err),
+		)
+		return nil, status.Error(codes.Internal, "failed to apply bonus days")
+	}
+
+	resp := &pb.ApplyBonusDaysResponse{
+		PendingDaysTotal: pendingTotal,
+	}
+	if addedToPending {
+		resp.AddedToPending = true
+	} else {
+		resp.AppliedToSubscription = true
+		resp.ExtendedSubscription = modelSubscriptionToProto(sub)
+	}
+	return resp, nil
+}
+
 func (a *SubscriptionAPI) ClaimChannelBonus(ctx context.Context, req *pb.ClaimChannelBonusRequest) (*pb.ClaimChannelBonusResponse, error) {
 	if req.UserId == 0 {
 		return nil, status.Error(codes.InvalidArgument, "user_id is required")

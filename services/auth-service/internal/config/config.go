@@ -11,7 +11,14 @@ type Config struct {
 	DB       DBConfig
 	JWT      JWTConfig
 	Telegram TelegramConfig
+	Services ServicesConfig
 	Log      LogConfig
+}
+
+// ServicesConfig — внешние gRPC сервисы.
+// ReferralAddr может быть пустым — тогда auth не дёргает referral на новых юзерах.
+type ServicesConfig struct {
+	ReferralAddr string
 }
 
 type GRPCConfig struct {
@@ -74,6 +81,9 @@ func New() (*Config, error) {
 		},
 		Telegram: TelegramConfig{
 			BotToken: getEnv("TELEGRAM_BOT_TOKEN", ""),
+		},
+		Services: ServicesConfig{
+			ReferralAddr: getEnv("REFERRAL_SERVICE_ADDR", ""),
 		},
 		Log: LogConfig{
 			Level: getEnv("LOG_LEVEL", "info"),

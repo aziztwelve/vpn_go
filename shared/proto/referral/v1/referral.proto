@@ -1,0 +1,171 @@
+syntax = "proto3";
+
+package referral.v1;
+
+option go_package = "github.com/vpn/shared/pkg/proto/referral/v1";
+
+// ReferralService — реферальная программа.
+//
+// Бизнес-логика:
+//   - Каждый юзер может получить уникальную реферальную ссылку
+//     (формат t.me/<bot>?startapp=ref_<token>).
+//   - Когда новый юзер регистрируется через эту ссылку, RegisterReferral
+//     создаёт связь inviter↔invited и начисляет бонусы:
+//     * inviter (role=user)    → +3 дня к активной подписке (или pending_bonus_days)
+//     * inviter (role=partner) → ничего (ждёт ApplyBonus при покупке)
+//     * invited (role=user)    → +3 дня к подписке (или pending_bonus_days)
+//   - При первой успешной оплате приглашённого:
+//     * inviter (role=partner) → 30% от суммы платежа на users.balance
+//     * inviter (role=user)    → ничего (бонус уже выдан при регистрации)
+//   - Партнёры могут запросить вывод средств (CreateWithdrawalRequest),
+//     заявка обрабатывается админом отдельно.
+service ReferralService {
+  // Получить или создать реферальную ссылку для юзера. Идемпотентно —
+  // один юзер всегда получает один и тот же токен.
+  rpc GetOrCreateReferralLink(GetOrCreateReferralLinkRequest) returns (GetOrCreateReferralLinkResponse);
+
+  // Зарегистрировать переход по реферальной ссылке (увеличивает clicks).
+  // Пока не используется напрямую, оставлено для будущей аналитики.
+  rpc RegisterClick(RegisterClickRequest) returns (RegisterClickResponse);
+
+  // Зарегистрировать факт реферальной регистрации (вызов из auth-service
+  // когда новый юзер создан с ref_token). Anti-abuse:
+  //   * inviter != invited
+  //   * invited.created_at < freshness_seconds (по умолчанию 60s)
+  //   * один inviter на invited (UNIQUE).
+  // Начисляет первичные бонусы (см. описание сервиса).
+  rpc RegisterReferral(RegisterReferralRequest) returns (RegisterReferralResponse);
+
+  // Применить бонус по факту первой успешной оплаты приглашённого
+  // (вызов из payment-service). Идемпотентно — повторный вызов с тем же
+  // payment_id ничего не делает.
+  rpc ApplyBonus(ApplyBonusRequest) returns (ApplyBonusResponse);
+
+  // Получить статистику рефералов юзера (количество приглашённых,
+  // заработанные дни/деньги, текущий партнёрский баланс).
+  rpc GetReferralStats(GetReferralStatsRequest) returns (GetReferralStatsResponse);
+
+  // Создать заявку на вывод средств (только для role=partner).
+  rpc CreateWithdrawalRequest(CreateWithdrawalRequestRequest) returns (CreateWithdrawalRequestResponse);
+
+  // Список заявок на вывод (для самого юзера или для админки).
+  rpc ListWithdrawalRequests(ListWithdrawalRequestsRequest) returns (ListWithdrawalRequestsResponse);
+}
+
+// ─── GetOrCreateReferralLink ────────────────────────────────────────
+message GetOrCreateReferralLinkRequest {
+  int64 user_id = 1;
+}
+
+message GetOrCreateReferralLinkResponse {
+  // Полный URL deep-link'а для шаринга, например:
+  //   https://t.me/maydavpnbot?startapp=ref_a1b2c3d4
+  string url = 1;
+  // Сам токен (без префикса ref_), для удобства фронтов.
+  string token = 2;
+  int32 click_count = 3;
+}
+
+// ─── RegisterClick ──────────────────────────────────────────────────
+message RegisterClickRequest {
+  string token = 1;
+}
+
+message RegisterClickResponse {
+  bool found = 1;
+  int32 click_count = 2;
+}
+
+// ─── RegisterReferral ───────────────────────────────────────────────
+message RegisterReferralRequest {
+  // Токен из реферальной ссылки (без префикса ref_).
+  string inviter_token = 1;
+  // Юзер, который только что зарегистрировался через эту ссылку.
+  int64 invited_user_id = 2;
+}
+
+message RegisterReferralResponse {
+  bool registered = 1;          // true → связь создана
+  int64 inviter_user_id = 2;
+  // Причина почему не зарегистрировано (если registered=false):
+  //   "self_invite"        — пытается пригласить самого себя
+  //   "token_not_found"    — нет такого токена
+  //   "already_invited"    — у invited уже есть inviter
+  //   "user_too_old"       — invited создан давно (anti-abuse)
+  //   "invited_not_found"  — нет такого юзера
+  string skip_reason = 3;
+  // Бонусы которые были начислены сразу (для логирования / UI).
+  int32 inviter_days_awarded = 4;
+  int32 invited_days_awarded = 5;
+}
+
+// ─── ApplyBonus ─────────────────────────────────────────────────────
+message ApplyBonusRequest {
+  // Юзер который сделал успешную оплату. Сервис сам найдёт его inviter'а.
+  int64 invited_user_id = 1;
+  // Сумма платежа в RUB (для расчёта 30% партнёрского бонуса).
+  string payment_amount_rub = 2; // Decimal as string
+  // ID платежа — для идемпотентности (один платёж = один бонус).
+  int64 payment_id = 3;
+}
+
+message ApplyBonusResponse {
+  bool applied = 1;             // true → бонус начислен
+  bool already_applied = 2;     // true → этот payment_id уже обрабатывался
+  bool no_relationship = 3;     // true → у юзера нет inviter'а
+  int64 inviter_user_id = 4;
+  string inviter_role = 5;      // user, partner
+  string balance_amount_rub = 6; // сумма зачисленная на partner.balance (Decimal as string)
+}
+
+// ─── GetReferralStats ───────────────────────────────────────────────
+message GetReferralStatsRequest {
+  int64 user_id = 1;
+}
+
+message GetReferralStatsResponse {
+  int32 invited_count = 1;          // всего приглашённых
+  int32 purchased_count = 2;        // из них совершили оплату
+  int32 rewarded_days_total = 3;    // сколько бонусных дней начислено за всё время (для role=user)
+  string earned_balance_rub_total = 4; // сколько ₽ заработано на балансе (для role=partner)
+  string current_balance_rub = 5;   // текущий доступный баланс
+  int32 pending_count = 6;          // приглашены, но ещё не оплатили (для role=partner)
+}
+
+// ─── Withdrawal ─────────────────────────────────────────────────────
+message CreateWithdrawalRequestRequest {
+  int64 user_id = 1;
+  string amount_rub = 2;        // Decimal as string
+  string payment_method = 3;    // "card", "yoomoney", "crypto", и т.д.
+  // Реквизиты в свободной форме (карта, кошелёк и т.п.). Сериализуется как JSON.
+  map<string, string> payment_details = 4;
+}
+
+message CreateWithdrawalRequestResponse {
+  WithdrawalRequest request = 1;
+  string error = 2;             // "insufficient_balance", "not_partner", "amount_too_small"
+}
+
+message ListWithdrawalRequestsRequest {
+  int64 user_id = 1;            // 0 = все (для админки)
+  string status = 2;            // "" = все, либо pending/approved/rejected/paid
+  int32 limit = 3;
+  int32 offset = 4;
+}
+
+message ListWithdrawalRequestsResponse {
+  repeated WithdrawalRequest requests = 1;
+  int32 total = 2;
+}
+
+message WithdrawalRequest {
+  int64 id = 1;
+  int64 user_id = 2;
+  string amount_rub = 3;
+  string payment_method = 4;
+  map<string, string> payment_details = 5;
+  string status = 6;            // pending, approved, rejected, paid
+  string admin_comment = 7;
+  string created_at = 8;
+  string processed_at = 9;
+}

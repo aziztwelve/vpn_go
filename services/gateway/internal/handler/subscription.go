@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/vpn/gateway/internal/client"
+	authmw "github.com/vpn/platform/pkg/middleware"
 	"go.uber.org/zap"
 )
 
@@ -32,8 +33,10 @@ func (h *SubscriptionHandler) ListPlans(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	uid, _ := authmw.UserIDFromContext(r.Context())
 	plans := make([]map[string]interface{}, 0, len(resp.Plans))
 	for _, plan := range resp.Plans {
+		if plan.Id == 100 && uid != 13 { continue } // тест-план 1₽ — только aziztwelve (user_id=13)
 		plans = append(plans, map[string]interface{}{
 			"id":            plan.Id,
 			"name":          plan.Name,

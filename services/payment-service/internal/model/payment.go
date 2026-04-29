@@ -2,14 +2,31 @@ package model
 
 import "time"
 
-// Status значения согласно CHECK-constraint миграции 001.
+// Status значения согласно CHECK-constraint миграций 001/002/003.
+//
+// Финальные статусы:           pending → paid | failed | cancelled | refunded
+// Промежуточные (миграция 003): paid_db_only → paid_subscription_done → paid
+//
+// Промежуточные используются service.handleSuccessfulPayment'ом как
+// чек-поинты: на каждом ретрае webhook'а мы знаем где остановились и
+// продолжаем с нужного шага. См. docs/services/payment-integration.md.
 const (
-	StatusPending   = "pending"
-	StatusPaid      = "paid"
-	StatusFailed    = "failed"
-	StatusRefunded  = "refunded"
-	StatusCancelled = "cancelled"
+	StatusPending          = "pending"
+	StatusPaidDBOnly       = "paid_db_only"           // MarkPaid сделан, подписка ещё не создана
+	StatusPaidSubscription = "paid_subscription_done" // подписка создана, VPN-юзер не зарегистрирован
+	StatusPaid             = "paid"                   // финальный — всё прошло
+	StatusFailed           = "failed"
+	StatusRefunded         = "refunded"
+	StatusCancelled        = "cancelled"
 )
+
+// IsPaidIntermediate возвращает true если платёж в одном из промежуточных
+// "оплачено-но-не-всё-сделано" статусов. Используется sentinel cron'ом для
+// поиска зависших платежей и в service для определения "с какого шага
+// продолжать". Финальный paid сюда НЕ входит.
+func IsPaidIntermediate(status string) bool {
+	return status == StatusPaidDBOnly || status == StatusPaidSubscription
+}
 
 // Провайдеры платежей.
 const (

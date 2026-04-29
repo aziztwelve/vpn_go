@@ -2,9 +2,11 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/vpn/vpn-service/internal/model"
 )
@@ -160,23 +162,54 @@ func (r *VPNRepository) ListActiveServerIDs(ctx context.Context) ([]int32, error
 }
 
 // VPN Users
-func (r *VPNRepository) CreateVPNUser(ctx context.Context, userID, subscriptionID int64, uuid, email, flow, subscriptionToken string) (*model.VPNUser, error) {
-	query := `
+//
+// CreateVPNUser — идемпотентная вставка через ON CONFLICT DO NOTHING.
+// Возвращает (user, created), где created=true если строка была реально
+// создана, false если уже существовала (пара (user_id, subscription_id) — UNIQUE).
+//
+// При created=false возвращается **существующая** запись с её UUID/токеном —
+// это важно: caller обязан использовать тот же UUID для Xray.AddUser, иначе
+// зарегистрирует "новый" inbound user, не совпадающий с тем, что в БД.
+//
+// Зачем так:
+//   - повторные webhook'и от Platega (32-часовой ретрай) не должны создавать
+//     дубликаты или валиться с 23505;
+//   - триал → платная подписка через upsert subscriptions переиспользует
+//     subscription_id, поэтому vpn_users тоже остаётся прежний;
+//   - chargeback → ре-активация подписки тоже работает идемпотентно.
+func (r *VPNRepository) CreateVPNUser(ctx context.Context, userID, subscriptionID int64, uuid, email, flow, subscriptionToken string) (vpnUser *model.VPNUser, created bool, err error) {
+	const insertQ = `
 		INSERT INTO vpn_users (user_id, subscription_id, uuid, email, flow, subscription_token)
 		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (user_id, subscription_id) DO NOTHING
 		RETURNING id, user_id, subscription_id, uuid, email, flow, subscription_token, created_at
 	`
 
-	vpnUser := &model.VPNUser{}
-	err := r.db.QueryRow(ctx, query, userID, subscriptionID, uuid, email, flow, subscriptionToken).Scan(
+	vpnUser = &model.VPNUser{}
+	err = r.db.QueryRow(ctx, insertQ, userID, subscriptionID, uuid, email, flow, subscriptionToken).Scan(
 		&vpnUser.ID, &vpnUser.UserID, &vpnUser.SubscriptionID, &vpnUser.UUID,
 		&vpnUser.Email, &vpnUser.Flow, &vpnUser.SubscriptionToken, &vpnUser.CreatedAt,
 	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create vpn user: %w", err)
+	if err == nil {
+		return vpnUser, true, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, fmt.Errorf("failed to create vpn user: %w", err)
 	}
 
-	return vpnUser, nil
+	// ON CONFLICT сработал — берём существующую запись.
+	const selectQ = `
+		SELECT id, user_id, subscription_id, uuid, email, flow, subscription_token, created_at
+		FROM vpn_users
+		WHERE user_id = $1 AND subscription_id = $2
+	`
+	if err := r.db.QueryRow(ctx, selectQ, userID, subscriptionID).Scan(
+		&vpnUser.ID, &vpnUser.UserID, &vpnUser.SubscriptionID, &vpnUser.UUID,
+		&vpnUser.Email, &vpnUser.Flow, &vpnUser.SubscriptionToken, &vpnUser.CreatedAt,
+	); err != nil {
+		return nil, false, fmt.Errorf("conflict but row not found: %w", err)
+	}
+	return vpnUser, false, nil
 }
 
 func (r *VPNRepository) GetVPNUserByUserID(ctx context.Context, userID int64) (*model.VPNUser, error) {

@@ -51,6 +51,9 @@ type ServicesConfig struct {
 	SubscriptionAddr string
 	VPNAddr          string
 	PaymentAddr      string
+	// ReferralAddr — опциональный. Пустая строка → реферальные REST-ручки
+	// возвращают 503 (фича выключена), но остальные ручки работают.
+	ReferralAddr string
 }
 
 type LogConfig struct {
@@ -73,6 +76,7 @@ func New() (*Config, error) {
 			SubscriptionAddr: getEnv("SUBSCRIPTION_SERVICE_ADDR", "localhost:50061"),
 			VPNAddr:          getEnv("VPN_SERVICE_ADDR", "localhost:50062"),
 			PaymentAddr:      getEnv("PAYMENT_SERVICE_ADDR", "localhost:50063"),
+			ReferralAddr:     getEnv("REFERRAL_SERVICE_ADDR", ""),
 		},
 		JWT: JWTConfig{
 			Secret: getEnv("JWT_SECRET", ""),

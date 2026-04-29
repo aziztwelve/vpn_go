@@ -37,6 +37,14 @@ service SubscriptionService {
   // Начислить бонус за подписку на канал (+3 дня к активной подписке)
   // Идемпотентно — если users.channel_bonus_claimed=true, возвращает already_claimed=true
   rpc ClaimChannelBonus(ClaimChannelBonusRequest) returns (ClaimChannelBonusResponse);
+
+  // Начислить бонусные дни к активной подписке. Если активной нет —
+  // дни накапливаются в users.pending_bonus_days и применяются при следующем
+  // CreateSubscription/StartTrial. Используется реферальной программой
+  // (referral-service) и любыми другими сервисами, которым нужно подарить дни.
+  // НЕ идемпотентно — каждый вызов добавляет дни. Идемпотентность должна
+  // обеспечиваться вызывающей стороной (через свои бонус-записи).
+  rpc ApplyBonusDays(ApplyBonusDaysRequest) returns (ApplyBonusDaysResponse);
 }
 
 message ListPlansRequest {
@@ -147,6 +155,20 @@ message DevicePrice {
   string price = 2;            // Decimal as string (RUB)
   int32 price_stars = 3;       // Telegram Stars (MVP)
   string plan_name = 4;        // дубликат из plan для удобства client-side
+}
+
+message ApplyBonusDaysRequest {
+  int64 user_id = 1;
+  int32 days = 2;
+}
+
+message ApplyBonusDaysResponse {
+  // true если дни добавлены к активной подписке (extended_subscription заполнен).
+  bool applied_to_subscription = 1;
+  // true если активной подписки не было, дни ушли в users.pending_bonus_days.
+  bool added_to_pending = 2;
+  Subscription extended_subscription = 3;
+  int32 pending_days_total = 4; // итоговое значение users.pending_bonus_days
 }
 
 message Subscription {

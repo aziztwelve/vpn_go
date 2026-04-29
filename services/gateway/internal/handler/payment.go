@@ -7,8 +7,11 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/vpn/gateway/internal/client"
 	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type PaymentHandler struct {
@@ -42,10 +45,14 @@ func (h *PaymentHandler) CreateInvoice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Получаем провайдер из query parameter
+	// Получаем провайдер из query parameter.
+	// Default = "platega" — на текущий момент включён только этот провайдер
+	// (см. docs/services/platega-integration.md). Остальные (telegram_stars,
+	// wata, yoomoney) можно включить через *_ENABLED env-флаги — фронт явно
+	// передаёт ?provider=... когда селектор расширяется.
 	provider := r.URL.Query().Get("provider")
 	if provider == "" {
-		provider = "telegram_stars" // по умолчанию
+		provider = "platega"
 	}
 
 	var req CreateInvoiceRequest
@@ -74,6 +81,62 @@ func (h *PaymentHandler) CreateInvoice(w http.ResponseWriter, r *http.Request) {
 		"invoice_link": resp.InvoiceLink,
 		"amount_stars": resp.AmountStars,
 		"provider":     provider,
+	})
+}
+
+// GetPayment — GET /api/v1/payments/{id} (защищённая JWT).
+// Возвращает один платёж по ID. Используется фронтом на /payment/pending для
+// поллинга статуса (вместо тяжёлого ListUserPayments(100)).
+//
+// Авторизация: payment.user_id обязан совпадать с user_id из JWT —
+// иначе 404 (не раскрываем существование чужого платежа).
+func (h *PaymentHandler) GetPayment(w http.ResponseWriter, r *http.Request) {
+	userID, ok := userIDFromRequest(w, r)
+	if !ok {
+		return
+	}
+
+	idStr := chi.URLParam(r, "id")
+	paymentID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || paymentID <= 0 {
+		http.Error(w, "invalid payment id", http.StatusBadRequest)
+		return
+	}
+
+	resp, err := h.paymentClient.GetPayment(r.Context(), paymentID)
+	if err != nil {
+		if st, stOK := status.FromError(err); stOK && st.Code() == codes.NotFound {
+			http.Error(w, "payment not found", http.StatusNotFound)
+			return
+		}
+		h.logger.Error("GetPayment failed",
+			zap.Int64("payment_id", paymentID),
+			zap.Int64("user_id", userID),
+			zap.Error(err))
+		http.Error(w, "failed to get payment", http.StatusInternalServerError)
+		return
+	}
+
+	p := resp.GetPayment()
+	if p == nil || p.GetUserId() != userID {
+		// Чужой платёж или пустой ответ — отдаём 404, не раскрывая факт
+		// существования платежа.
+		http.Error(w, "payment not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"id":           p.Id,
+		"user_id":      p.UserId,
+		"plan_id":      p.PlanId,
+		"max_devices":  p.MaxDevices,
+		"amount_stars": p.AmountStars,
+		"status":       p.Status,
+		"external_id":  p.ExternalId,
+		"provider":     p.Provider,
+		"created_at":   p.CreatedAt,
+		"paid_at":      p.PaidAt,
 	})
 }
 
@@ -207,6 +270,12 @@ func (h *PaymentHandler) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	case "wata":
 		// WATA: RSA-SHA512 base64 в X-Signature
 		signature = r.Header.Get("X-Signature")
+	case "platega":
+		// Platega: подписи нет, аутентификация через сравнение двух хедеров
+		// X-MerchantId / X-Secret. Склеиваем их через ":" и передаём в
+		// payment-service единым полем signature — provider распарсит
+		// strings.Cut(":", 2) и сверит через subtle.ConstantTimeCompare.
+		signature = r.Header.Get("X-MerchantId") + ":" + r.Header.Get("X-Secret")
 	}
 
 	// Вызываем payment-service

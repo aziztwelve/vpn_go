@@ -74,19 +74,36 @@ func (s *VPNService) xrayClientForServer(ctx context.Context, srv *model.VPNServ
 //     cron'а), но возвращаем ошибку клиенту.
 //   - "already exists" трактуем как success (идемпотентность retry).
 func (s *VPNService) CreateVPNUser(ctx context.Context, userID, subscriptionID int64) (*model.VPNUser, error) {
-	userUUID := uuid.New().String()
+	// Кандидаты на новую запись — используются только если её ещё нет.
+	// При существующей записи репо вернёт её с её UUID/токеном (см. идемпотентность).
+	candidateUUID := uuid.New().String()
 	email := fmt.Sprintf("user%d@vpn.local", userID)
 	flow := "xtls-rprx-vision"
 
-	subToken, err := generateSubscriptionToken()
+	candidateToken, err := generateSubscriptionToken()
 	if err != nil {
 		return nil, fmt.Errorf("generate subscription token: %w", err)
 	}
 
-	vpnUser, err := s.repo.CreateVPNUser(ctx, userID, subscriptionID, userUUID, email, flow, subToken)
+	vpnUser, created, err := s.repo.CreateVPNUser(ctx, userID, subscriptionID, candidateUUID, email, flow, candidateToken)
 	if err != nil {
 		return nil, err
 	}
+	if !created {
+		s.logger.Info("vpn user already exists — reusing existing record (idempotent)",
+			zap.Int64("user_id", userID),
+			zap.Int64("subscription_id", subscriptionID),
+			zap.Int64("vpn_user_id", vpnUser.ID),
+			zap.String("uuid", vpnUser.UUID),
+		)
+	}
+
+	// В Xray регистрируем по UUID/email/flow из БД — он совпадает с тем, что
+	// мы только что вставили (created=true), либо это UUID существующей записи
+	// (created=false). Гарантирует консистентность БД ↔ Xray.
+	xrayUUID := vpnUser.UUID
+	xrayEmail := vpnUser.Email
+	xrayFlow := vpnUser.Flow
 
 	servers, err := s.repo.ListServers(ctx, true)
 	if err != nil {
@@ -108,7 +125,7 @@ func (s *VPNService) CreateVPNUser(ctx context.Context, userID, subscriptionID i
 			)
 			continue
 		}
-		if err := cli.AddUser(ctx, srv.InboundTag, userUUID, email, flow); err != nil {
+		if err := cli.AddUser(ctx, srv.InboundTag, xrayUUID, xrayEmail, xrayFlow); err != nil {
 			if isAlreadyExists(err) {
 				s.logger.Warn("xray user already exists, treating as success",
 					zap.Int64("user_id", userID),
@@ -139,7 +156,7 @@ func (s *VPNService) CreateVPNUser(ctx context.Context, userID, subscriptionID i
 	if len(servers) > 0 && succeeded == 0 {
 		s.logger.Error("VPN user DB-created but not registered on any Xray server",
 			zap.Int64("user_id", userID),
-			zap.String("uuid", userUUID),
+			zap.String("uuid", xrayUUID),
 			zap.Int("failed", failed),
 		)
 		return vpnUser, fmt.Errorf("failed to register on any of %d Xray servers", len(servers))
@@ -147,7 +164,7 @@ func (s *VPNService) CreateVPNUser(ctx context.Context, userID, subscriptionID i
 
 	s.logger.Info("VPN user created",
 		zap.Int64("user_id", userID),
-		zap.String("uuid", userUUID),
+		zap.String("uuid", xrayUUID),
 		zap.Int("servers_total", len(servers)),
 		zap.Int("servers_ok", succeeded),
 		zap.Int("servers_failed", failed),

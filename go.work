@@ -7,6 +7,7 @@ use (
 	./services/auth-service
 	./services/gateway
 	./services/payment-service
+	./services/referral-service
 	./services/subscription-service
 	./services/vpn-service
 	./shared

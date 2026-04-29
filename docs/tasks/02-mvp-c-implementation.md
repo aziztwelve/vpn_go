@@ -600,6 +600,53 @@ invited_user_id делает первую оплату (payment-service успе
 - [ ] Экран "Пригласить друга" с кнопкой "Поделиться" — вызов Telegram WebApp `shareStory` или копирование ссылки в clipboard
 - [ ] Счётчик приглашённых + бонусных дней в профиле
 
+**7.7 Follow-up (после первой реализации Этапа 7):**
+
+Эти пункты появились по итогам интеграции referral-service со связкой
+auth/payment/gateway/vpn_next и осознанно вынесены отдельно от MVP-объёма,
+чтобы не блокировать запуск фичи. Делать сразу после прогона e2e (см. ниже)
+или по отдельному запросу.
+
+- [ ] **Unit-тесты на бизнес-логику** `services/referral-service/internal/service/referral_test.go`:
+      - `RegisterReferral`: self-invite (inviter_telegram_id == invited.telegram_id) → 0-эффект,
+      - freshness: invited.created_at старше `FRESHNESS_SECONDS` → не регистрируется,
+      - повторный вызов с тем же `invited_id` → idempotent (UNIQUE relationships),
+      - inviter.role='user' → +N дней обоим (через `subscription.AddDaysToActiveSubscription` или `users.pending_bonus_days`),
+      - inviter.role='partner' → relationship создан, бонус ждёт ApplyBonus,
+      - `ApplyBonus` идемпотентность: повторный вызов на ту же relationship не двоит начисление,
+      - `CreateWithdrawalRequest`: insufficient_balance / not_partner / amount_too_small.
+      Сейчас покрыт только token generator (`internal/token/`).
+
+- [ ] **Lint cleanup в vpn_next** (вне scope Этапа 7, но накопилось 12 проблем):
+      9 errors / 3 warnings — `react-hooks/set-state-in-effect`, `react-hooks/purity`,
+      `@typescript-eslint/no-require-imports` (tailwind.config.ts).
+      Файлы: `connect/page.tsx`, `history/page.tsx`, `auth-context.tsx`, `referral/page.tsx`, `tailwind.config.ts` и др.
+      Можно сделать одним PR'ом с переходом на паттерн `useEffectEvent` / `cancellable AbortController`,
+      затрагивает не только реферальную страницу.
+
+- [ ] **Локальный e2e референтальной программы** (manual, не CI):
+      1. `task compose:up` → миграции referral отрабатывают (видно в логах `migrate`).
+      2. Юзер A: открыть Mini App → `GET /api/v1/referral/link` → токен `T`.
+      3. Юзер B (новый Telegram-аккаунт): открыть `https://t.me/<bot>?startapp=ref_T` → запуск Mini App.
+      4. Проверить в БД: `referral_relationships` с inviter_id=A, invited_id=B, status='registered';
+         `referral_bonuses` две строки type='days'; у обоих active subscription продлена на 3 дня
+         (или у B — `users.pending_bonus_days=3`, если активной не было — съедается следующей CreateSubscription).
+      5. Если A.role='partner': B оплачивает любой план → проверить `users.balance` у A
+         выросла на `amount * 0.30`, в `referral_bonuses` появилась строка type='balance', is_applied=true,
+         relationship.status='purchased'.
+      6. A создаёт `POST /api/v1/referral/withdrawal` → запись в `withdrawal_requests` со status='pending'.
+      Требует реальный `AUTH_TELEGRAM_BOT_TOKEN` и тестовых TG-аккаунтов; в CI не гонится.
+
+- [ ] **Admin UI обработки `withdrawal_requests`** — выносится в **Этап 8** (Admin Service).
+      Сейчас юзер может создать заявку, но обработать её можно только ручным SQL.
+      В Admin Service добавить:
+      - `ListWithdrawalRequests(filter, limit, offset)` (proxy в referral-service),
+      - `ApproveWithdrawalRequest(id, admin_comment)` → status='approved',
+      - `RejectWithdrawalRequest(id, admin_comment)` → status='rejected' + откат `users.balance`,
+      - `MarkWithdrawalPaid(id)` → status='paid' (после ручной выплаты вне системы).
+      Соответствующие RPC уже есть в `services/referral-service/internal/api/referral.go` —
+      админ-сервису остаётся только проксировать с проверкой `RequireRole("admin")`.
+
 ---
 
 ### Этап 8 — Admin Service (1 день)

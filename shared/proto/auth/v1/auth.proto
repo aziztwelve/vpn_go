@@ -23,12 +23,18 @@ service AuthService {
 
 message ValidateTelegramUserRequest {
   string init_data = 1; // Telegram WebApp initData
+  // Опциональный реферальный токен (без префикса ref_), извлечённый
+  // фронтом из start_param. Используется ТОЛЬКО при создании нового юзера —
+  // существующие пользователи игнорируются (нельзя задним числом стать рефералом).
+  string ref_token = 2;
 }
 
 message ValidateTelegramUserResponse {
   User user = 1;
   string jwt_token = 2; // JWT для внутренней авторизации
   bool is_new_user = 3; // true если юзер был создан только что (для trial-активации в Gateway)
+  // true если реферальная регистрация прошла успешно (для UI feedback).
+  bool referral_registered = 4;
 }
 
 message GetUserRequest {

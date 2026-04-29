@@ -46,9 +46,10 @@ services:
       - ../../services/subscription-service/migrations:/migrations/subscription
       - ../../services/vpn-service/migrations:/migrations/vpn
       - ../../services/payment-service/migrations:/migrations/payment
+      - ../../services/referral-service/migrations:/migrations/referral
     entrypoint: >
       sh -c "
-      for m in auth subscription vpn payment; do
+      for m in auth subscription vpn payment referral; do
         echo '>>> migrating' $$m;
         migrate -path /migrations/$$m -database 'postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable&x-migrations-table='$$m'_schema_migrations' up || exit 1;
       done;
@@ -76,6 +77,10 @@ services:
       JWT_SECRET: ${AUTH_JWT_SECRET}
       JWT_TTL_HOURS: ${AUTH_JWT_TTL_HOURS}
       TELEGRAM_BOT_TOKEN: ${AUTH_TELEGRAM_BOT_TOKEN}
+      # Реферальная интеграция: при создании нового юзера с непустым ref_token
+      # auth-service вызовет referral-service.RegisterReferral. Если addr пустой
+      # — фича отключена (best-effort, регистрацию не ломает в любом случае).
+      REFERRAL_SERVICE_ADDR: ${AUTH_REFERRAL_SERVICE_ADDR:-}
       LOG_LEVEL: ${AUTH_LOG_LEVEL}
     ports:
       - "${AUTH_GRPC_PORT}:${AUTH_GRPC_PORT}"
@@ -149,6 +154,8 @@ services:
         condition: service_started
       vpn-service:
         condition: service_started
+      auth-service:
+        condition: service_started
     environment:
       GRPC_HOST: ${PAYMENT_GRPC_HOST}
       GRPC_PORT: ${PAYMENT_GRPC_PORT}
@@ -159,8 +166,12 @@ services:
       DB_NAME: ${POSTGRES_DB}
       SUBSCRIPTION_SERVICE_ADDR: subscription-service:${SUB_GRPC_PORT}
       VPN_SERVICE_ADDR: vpn-service:${VPN_GRPC_PORT}
+      AUTH_SERVICE_ADDR: auth-service:${AUTH_GRPC_PORT}
       TELEGRAM_BOT_TOKEN: ${AUTH_TELEGRAM_BOT_TOKEN}
       TELEGRAM_WEBHOOK_SECRET: ${PAYMENT_TELEGRAM_WEBHOOK_SECRET}
+      # Включает Telegram Stars как платёжный провайдер. БотToken остаётся required
+      # для /start, /bonus и авторизации даже при STARS_ENABLED=false.
+      TELEGRAM_STARS_ENABLED: ${PAYMENT_TELEGRAM_STARS_ENABLED:-false}
       MINIAPP_URL: ${MINIAPP_URL}
       LOG_LEVEL: ${PAYMENT_LOG_LEVEL}
       # WATA H2H API (доп. провайдер). Если WATA_ENABLED=false —
@@ -171,8 +182,62 @@ services:
       WATA_SUCCESS_URL: ${PAYMENT_WATA_SUCCESS_URL:-}
       WATA_FAIL_URL: ${PAYMENT_WATA_FAIL_URL:-}
       WATA_LINK_TTL: ${PAYMENT_WATA_LINK_TTL:-72h}
+      # Platega.io API — основной провайдер оплаты (СБП/Карта/ЕРИП/Crypto).
+      # Если PLATEGA_ENABLED=true — требуются MERCHANT_ID и API_SECRET.
+      # См. docs/services/platega-integration.md.
+      PLATEGA_ENABLED: ${PAYMENT_PLATEGA_ENABLED:-false}
+      PLATEGA_BASE_URL: ${PAYMENT_PLATEGA_BASE_URL:-https://app.platega.io}
+      PLATEGA_MERCHANT_ID: ${PAYMENT_PLATEGA_MERCHANT_ID:-}
+      PLATEGA_API_SECRET: ${PAYMENT_PLATEGA_API_SECRET:-}
+      PLATEGA_SUCCESS_URL: ${PAYMENT_PLATEGA_SUCCESS_URL:-}
+      PLATEGA_FAIL_URL: ${PAYMENT_PLATEGA_FAIL_URL:-}
+      PLATEGA_DEFAULT_METHOD: ${PAYMENT_PLATEGA_DEFAULT_METHOD:-}
+      # Реферальная интеграция: при первой успешной оплате приглашённого юзера
+      # payment-service вызовет referral-service.ApplyBonus (best-effort).
+      REFERRAL_SERVICE_ADDR: ${PAYMENT_REFERRAL_SERVICE_ADDR:-}
     ports:
       - "${PAYMENT_GRPC_PORT}:${PAYMENT_GRPC_PORT}"
+    networks: [vpn]
+
+  referral-service:
+    build:
+      context: ../..
+      dockerfile: services/referral-service/Dockerfile
+    container_name: vpn-referral
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      subscription-service:
+        condition: service_started
+      auth-service:
+        condition: service_started
+    environment:
+      GRPC_HOST: ${REFERRAL_GRPC_HOST}
+      GRPC_PORT: ${REFERRAL_GRPC_PORT}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: ${POSTGRES_DB}
+      # Username бота (без @) для построения deep-link
+      # https://t.me/<BotUsername>?startapp=ref_<token>.
+      BOT_USERNAME: ${REFERRAL_BOT_USERNAME}
+      # Anti-abuse: только что созданные юзеры (моложе FRESHNESS_SECONDS) могут
+      # быть зарегистрированы по реферальной ссылке.
+      FRESHNESS_SECONDS: ${REFERRAL_FRESHNESS_SECONDS:-60}
+      # Сколько дней даём приглашённому/пригласителю-user при регистрации.
+      BONUS_DAYS: ${REFERRAL_BONUS_DAYS:-3}
+      # Процент партнёрской комиссии от суммы первого платежа приглашённого.
+      PARTNER_PERCENT: ${REFERRAL_PARTNER_PERCENT:-30}
+      # Минимальная сумма заявки на вывод (₽).
+      MIN_WITHDRAWAL_RUB: ${REFERRAL_MIN_WITHDRAWAL_RUB:-500}
+      # Cross-service вызовы: для прямого начисления бонусных дней
+      # активной подписке (или users.pending_bonus_days если активной нет).
+      SUBSCRIPTION_SERVICE_ADDR: subscription-service:${SUB_GRPC_PORT}
+      AUTH_SERVICE_ADDR: auth-service:${AUTH_GRPC_PORT}
+      LOG_LEVEL: ${REFERRAL_LOG_LEVEL}
+    ports:
+      - "${REFERRAL_GRPC_PORT}:${REFERRAL_GRPC_PORT}"
     networks: [vpn]
 
   xray:
@@ -204,6 +269,7 @@ services:
       - subscription-service
       - vpn-service
       - payment-service
+      - referral-service
       - xray
     environment:
       HTTP_HOST: ${GATEWAY_HTTP_HOST}

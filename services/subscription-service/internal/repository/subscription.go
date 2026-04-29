@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/vpn/subscription-service/internal/model"
 )
@@ -136,6 +137,40 @@ func (r *SubscriptionRepository) ExpireOverdueSubscriptions(ctx context.Context)
 }
 
 // Subscriptions
+// consumePendingBonusDaysTx — внутри транзакции списывает users.pending_bonus_days
+// и продлевает указанную подписку на это количество дней. Если pending=0 —
+// no-op. Используется в CreateSubscription/StartTrialTx чтобы автоматически
+// применить бонусы реферальной программы при первой покупке/триале.
+//
+// Возвращает количество фактически применённых дней (для логирования).
+func consumePendingBonusDaysTx(ctx context.Context, tx pgx.Tx, userID, subID int64, sub *model.Subscription) (int32, error) {
+	var pending int32
+	if err := tx.QueryRow(ctx,
+		`SELECT COALESCE(pending_bonus_days, 0) FROM users WHERE id = $1 FOR UPDATE`,
+		userID,
+	).Scan(&pending); err != nil {
+		return 0, fmt.Errorf("read pending_bonus_days: %w", err)
+	}
+	if pending <= 0 {
+		return 0, nil
+	}
+
+	// Продлеваем подписку и обнуляем pending.
+	if err := tx.QueryRow(ctx, `
+		UPDATE subscriptions
+		SET expires_at = expires_at + INTERVAL '1 day' * $2
+		WHERE id = $1
+		RETURNING expires_at
+	`, subID, pending).Scan(&sub.ExpiresAt); err != nil {
+		return 0, fmt.Errorf("apply pending bonus days: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, `UPDATE users SET pending_bonus_days = 0 WHERE id = $1`, userID); err != nil {
+		return 0, fmt.Errorf("zero pending_bonus_days: %w", err)
+	}
+	return pending, nil
+}
+
 // CreateSubscription — upsert по user_id: если у юзера уже есть подписка
 // (включая активный триал) — обновляет её in-place с суммированием дней.
 //   - Активный триал → становится active, остаток триала + plan.duration_days
@@ -212,6 +247,11 @@ func (r *SubscriptionRepository) CreateSubscription(ctx context.Context, userID 
 	// Plan name — внутри той же транзакции чтобы избежать лишнего round-trip.
 	_ = tx.QueryRow(ctx, `SELECT name FROM subscription_plans WHERE id = $1`, planID).Scan(&sub.PlanName)
 
+	// Применяем накопленные реферальные бонусы (если были).
+	if _, err := consumePendingBonusDaysTx(ctx, tx, userID, sub.ID, sub); err != nil {
+		return nil, err
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
@@ -263,6 +303,14 @@ func (r *SubscriptionRepository) StartTrialTx(ctx context.Context, userID int64,
 		userID,
 	); err != nil {
 		return nil, false, fmt.Errorf("update trial_used_at: %w", err)
+	}
+
+	// Применяем накопленные реферальные бонусы (если были) — например,
+	// invited юзер пришёл по реф-ссылке: при регистрации referral-service
+	// вызвал ApplyBonusDays → не было активной → days попали в pending.
+	// Теперь, в момент создания триала, забираем их в подписку.
+	if _, err := consumePendingBonusDaysTx(ctx, tx, userID, sub.ID, sub); err != nil {
+		return nil, false, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -391,6 +439,83 @@ func (r *SubscriptionRepository) GetSubscriptionHistory(ctx context.Context, use
 	}
 
 	return subs, nil
+}
+
+// ApplyBonusDaysTx — атомарно добавляет days дней к активной подписке (active|trial),
+// либо если активной нет — увеличивает users.pending_bonus_days.
+//
+// Возвращает (sub, addedToPending, pendingTotal, err):
+//   - sub != nil → дни добавлены к подписке (sub содержит обновлённую подписку)
+//   - addedToPending=true → активной не было, days сохранены в pending_bonus_days
+//   - pendingTotal — итоговое значение users.pending_bonus_days после операции
+//
+// НЕ идемпотентна — каждый вызов добавляет дни. Идемпотентность должна
+// обеспечиваться вызывающей стороной (referral_bonuses.payment_id и т.п.).
+func (r *SubscriptionRepository) ApplyBonusDaysTx(ctx context.Context, userID int64, days int32) (*model.Subscription, bool, int32, error) {
+	if days <= 0 {
+		return nil, false, 0, fmt.Errorf("days must be positive, got %d", days)
+	}
+
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, false, 0, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Lock юзера на всё время транзакции — защита от гонки между ApplyBonusDays
+	// и CreateSubscription (которая тоже трогает pending_bonus_days).
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR UPDATE`, userID); err != nil {
+		return nil, false, 0, fmt.Errorf("lock user: %w", err)
+	}
+
+	// Ищем активную подписку (active|trial, не истёкшая).
+	var subID int64
+	var expiresAt time.Time
+	err = tx.QueryRow(ctx, `
+		SELECT id, expires_at
+		FROM subscriptions
+		WHERE user_id = $1 AND status IN ('active', 'trial') AND expires_at > NOW()
+		ORDER BY expires_at DESC
+		LIMIT 1
+		FOR UPDATE
+	`, userID).Scan(&subID, &expiresAt)
+
+	if err != nil {
+		// Активной нет — кладём в pending.
+		var pending int32
+		if err := tx.QueryRow(ctx, `
+			UPDATE users SET pending_bonus_days = COALESCE(pending_bonus_days, 0) + $2
+			WHERE id = $1
+			RETURNING pending_bonus_days
+		`, userID, days).Scan(&pending); err != nil {
+			return nil, false, 0, fmt.Errorf("update pending_bonus_days: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, false, 0, fmt.Errorf("commit: %w", err)
+		}
+		return nil, true, pending, nil
+	}
+
+	// Активная есть — продлеваем.
+	newExpires := expiresAt.Add(time.Duration(days) * 24 * time.Hour)
+	sub := &model.Subscription{}
+	err = tx.QueryRow(ctx, `
+		UPDATE subscriptions SET expires_at = $1
+		WHERE id = $2
+		RETURNING id, user_id, plan_id, max_devices, total_price, started_at, expires_at, status, created_at
+	`, newExpires, subID).Scan(
+		&sub.ID, &sub.UserID, &sub.PlanID, &sub.MaxDevices, &sub.TotalPrice,
+		&sub.StartedAt, &sub.ExpiresAt, &sub.Status, &sub.CreatedAt,
+	)
+	if err != nil {
+		return nil, false, 0, fmt.Errorf("update subscription: %w", err)
+	}
+	_ = tx.QueryRow(ctx, `SELECT name FROM subscription_plans WHERE id = $1`, sub.PlanID).Scan(&sub.PlanName)
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, false, 0, fmt.Errorf("commit: %w", err)
+	}
+	return sub, false, 0, nil
 }
 
 // ClaimChannelBonusTx атомарно начисляет +3 дня к активной подписке за подписку на канал.

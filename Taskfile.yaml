@@ -11,7 +11,7 @@ vars:
   MASTER_ENV: ./deploy/env/.env
   ENVSUBST_VERSION: 'v1.4.3'
   ENVSUBST: ./bin/envsubst
-  SERVICES: 'auth,sub,vpn,payment,gateway'
+  SERVICES: 'auth,sub,vpn,payment,referral,gateway'
 
 tasks:
   # ==================== ENV MANAGEMENT ====================
@@ -78,6 +78,14 @@ tasks:
     cmds:
       - go run cmd/main/main.go
 
+  dev:referral:
+    desc: Run referral-service locally (reads deploy/env/referral.env)
+    deps: [env:generate]
+    dir: "{{.SERVICES_DIR}}/referral-service"
+    dotenv: ['../../deploy/env/referral.env']
+    cmds:
+      - go run cmd/main/main.go
+
   dev:gateway:
     desc: Run gateway locally (reads deploy/env/gateway.env)
     deps: [env:generate]
@@ -112,6 +120,12 @@ tasks:
     cmds:
       - go build -o ../../{{.BIN_DIR}}/payment-service cmd/main/main.go
 
+  build:referral:
+    desc: Build referral-service binary
+    dir: "{{.SERVICES_DIR}}/referral-service"
+    cmds:
+      - go build -o ../../{{.BIN_DIR}}/referral-service cmd/main/main.go
+
   build:gateway:
     desc: Build gateway binary
     dir: "{{.SERVICES_DIR}}/gateway"
@@ -125,6 +139,7 @@ tasks:
       - task: build:sub
       - task: build:vpn
       - task: build:payment
+      - task: build:referral
       - task: build:gateway
 
   # ==================== PROTO ====================
@@ -251,26 +266,28 @@ tasks:
   # Стек должен быть поднят как минимум до postgres (task db:up или compose:up).
 
   migrate:up:
-    desc: Apply all migrations (auth → subscription → vpn → payment)
+    desc: Apply all migrations (auth → subscription → vpn → payment → referral)
     deps: [env:generate]
     cmds:
       # `up migrate` пересоздаёт one-shot контейнер с дефолтным entrypoint,
-      # который проходится по всем 4 сервисам и применяет миграции.
+      # который проходится по всем сервисам и применяет миграции.
       - docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} up --force-recreate migrate
 
   migrate:down:
-    desc: Roll back all migrations (payment → vpn → subscription → auth)
+    desc: Roll back all migrations (referral → payment → vpn → subscription → auth)
     deps: [env:generate]
     dotenv: ['{{.MASTER_ENV}}']
     cmds:
       # Используем тот же образ migrate/migrate:4 что и compose-сервис, через
       # `compose run` — это даёт правильную сеть и volumes без хардкода.
       # Креды передаём через -e (host-side dotenv) чтобы не мучиться с экранированием.
+      # Порядок rollback'а — обратный up: сначала referral (зависит от users),
+      # потом payment/vpn/subscription, последним auth (он определяет users).
       - |
         docker compose -f {{.COMPOSE_FILE}} --env-file {{.MASTER_ENV}} run --rm \
           -e DB_URL_BASE="postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable" \
           --entrypoint sh migrate -c '
-            for svc in payment vpn subscription auth; do
+            for svc in referral payment vpn subscription auth; do
               echo ">>> rolling back $svc";
               migrate -path /migrations/$svc \
                 -database "${DB_URL_BASE}&x-migrations-table=${svc}_schema_migrations" \
@@ -456,4 +473,4 @@ tasks:
     cmds:
       - rm -rf {{.BIN_DIR}}/*
       - rm -rf {{.PROTO_OUT_DIR}}/*
-      - rm -f {{.ENV_DIR}}/auth.env {{.ENV_DIR}}/sub.env {{.ENV_DIR}}/vpn.env {{.ENV_DIR}}/payment.env {{.ENV_DIR}}/gateway.env
+      - rm -f {{.ENV_DIR}}/auth.env {{.ENV_DIR}}/sub.env {{.ENV_DIR}}/vpn.env {{.ENV_DIR}}/payment.env {{.ENV_DIR}}/referral.env {{.ENV_DIR}}/gateway.env

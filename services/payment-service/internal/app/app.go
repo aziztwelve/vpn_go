@@ -4,17 +4,24 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/vpn/payment-service/internal/api"
 	"github.com/vpn/payment-service/internal/config"
+	"github.com/vpn/payment-service/internal/notifier"
 	"github.com/vpn/payment-service/internal/provider"
+	"github.com/vpn/payment-service/internal/provider/platega"
 	"github.com/vpn/payment-service/internal/provider/telegram"
 	"github.com/vpn/payment-service/internal/provider/wata"
 	"github.com/vpn/payment-service/internal/repository"
+	"github.com/vpn/payment-service/internal/sentinel"
 	"github.com/vpn/payment-service/internal/service"
 	"github.com/vpn/platform/pkg/closer"
+	authpb "github.com/vpn/shared/pkg/proto/auth/v1"
 	pb "github.com/vpn/shared/pkg/proto/payment/v1"
+	referralpb "github.com/vpn/shared/pkg/proto/referral/v1"
 	subpb "github.com/vpn/shared/pkg/proto/subscription/v1"
 	vpnpb "github.com/vpn/shared/pkg/proto/vpn/v1"
 	"go.uber.org/zap"
@@ -31,8 +38,16 @@ type App struct {
 	grpcServer *grpc.Server
 	closer     *closer.Closer
 
-	subConn *grpc.ClientConn
-	vpnConn *grpc.ClientConn
+	subConn      *grpc.ClientConn
+	vpnConn      *grpc.ClientConn
+	authConn     *grpc.ClientConn
+	referralConn *grpc.ClientConn // nil если REFERRAL_SERVICE_ADDR не задан
+
+	// sentinel — фоновый воркер для добивания зависших платежей.
+	// Управляется через sentinelCancel + sentinelWg в Stop().
+	sentinel       *sentinel.Sentinel
+	sentinelCancel context.CancelFunc
+	sentinelWg     sync.WaitGroup
 }
 
 func New(logger *zap.Logger) (*App, error) {
@@ -89,18 +104,65 @@ func (a *App) initGRPC() error {
 	a.vpnConn = vpnConn
 	a.closer.Add(func(ctx context.Context) error { return vpnConn.Close() })
 
+	// auth-service — нужен только для конвертации внутреннего user_id в
+	// telegram_id перед отправкой push-уведомления о платеже. Один RPC
+	// в успешный путь оплаты — допустимая цена за корректность.
+	authConn, err := grpc.NewClient(a.config.Services.AuthAddr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return fmt.Errorf("dial auth-service: %w", err)
+	}
+	a.authConn = authConn
+	a.closer.Add(func(ctx context.Context) error { return authConn.Close() })
+
+	// referral-service — опциональный. Если адрес не задан, реферальный хук
+	// не вызывается, partner-комиссия не начисляется.
+	var referralClient service.ReferralClient
+	if a.config.Services.ReferralAddr != "" {
+		referralConn, err := grpc.NewClient(a.config.Services.ReferralAddr,
+			grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			return fmt.Errorf("dial referral-service: %w", err)
+		}
+		a.referralConn = referralConn
+		a.closer.Add(func(ctx context.Context) error { return referralConn.Close() })
+		referralClient = referralpb.NewReferralServiceClient(referralConn)
+		a.logger.Info("Referral client configured",
+			zap.String("addr", a.config.Services.ReferralAddr))
+	}
+
 	// Инициализируем провайдеры
 	providers := a.initProviders()
 
-	// Собираем сервис с провайдерами
+	// Собираем сервис с провайдерами + Telegram notifier (для push-уведомлений
+	// после успешной оплаты). notifier == nil если BotToken пустой —
+	// тогда уведомления просто пропускаются.
+	tgNotifier := notifier.New(a.config.Telegram.BotToken, a.logger)
+	if tgNotifier != nil {
+		a.logger.Info("Telegram notifier initialized")
+	} else {
+		a.logger.Warn("Telegram notifier disabled (BotToken empty)")
+	}
+
 	repo := repository.New(a.db)
 	svc := service.New(
 		repo,
 		providers,
 		subpb.NewSubscriptionServiceClient(subConn),
 		vpnpb.NewVPNServiceClient(vpnConn),
+		authpb.NewAuthServiceClient(authConn),
+		referralClient,
+		tgNotifier,
 		a.logger,
 	)
+
+	// Sentinel воркер: добивает зависшие платежи (paid_db_only / paid_subscription_done)
+	// если webhook handler упал между шагами state machine. Запускается в Start().
+	a.sentinel = sentinel.New(repo, svc, sentinel.Config{
+		Interval:   60 * time.Second,
+		StaleAfter: 5 * time.Minute,
+		BatchLimit: 50,
+	}, a.logger)
 
 	// Создаём gRPC API
 	paymentAPI := api.New(svc, a.logger)
@@ -118,20 +180,27 @@ func (a *App) initGRPC() error {
 func (a *App) initProviders() []provider.PaymentProvider {
 	var providers []provider.PaymentProvider
 
-	// Telegram Stars провайдер (всегда включён)
-	if a.config.Telegram.BotToken != "" {
-		telegramProvider, err := telegram.NewProvider(a.config.Telegram.BotToken, a.logger)
-		if err != nil {
-			a.logger.Error("failed to init telegram provider", zap.Error(err))
+	// Telegram Stars провайдер (опционально, управляется TELEGRAM_STARS_ENABLED).
+	// Бот для /start, /bonus и авторизации работает через BotToken независимо от
+	// этого флага — здесь гейтится только регистрация Stars как платёжного канала.
+	if a.config.Telegram.StarsEnabled {
+		if a.config.Telegram.BotToken == "" {
+			a.logger.Error("TELEGRAM_STARS_ENABLED=true but TELEGRAM_BOT_TOKEN is empty")
 		} else {
-			providers = append(providers, telegramProvider)
-			a.logger.Info("Telegram Stars provider initialized")
+			telegramProvider, err := telegram.NewProvider(a.config.Telegram.BotToken, a.logger)
+			if err != nil {
+				a.logger.Error("failed to init telegram provider", zap.Error(err))
+			} else {
+				providers = append(providers, telegramProvider)
+				a.logger.Info("Telegram Stars provider initialized")
+			}
 		}
 	}
 
-	// YooMoney провайдер (опционально)
-	// TODO: добавить конфиг для YooMoney
-	// if a.config.YooMoney.WalletID != "" {
+	// YooMoney провайдер (опционально, в коде есть internal/provider/yoomoney/yoomoney.go,
+	// но регистрация выключена — кода для конфига пока нет).
+	// TODO: добавить YooMoneyConfig + инициализацию по аналогии с WATA/Platega.
+	// if a.config.YooMoney.Enabled {
 	// 	yoomoneyProvider := yoomoney.NewProvider(
 	// 		a.config.YooMoney.WalletID,
 	// 		a.config.YooMoney.SecretKey,
@@ -157,6 +226,25 @@ func (a *App) initProviders() []provider.PaymentProvider {
 		a.logger.Info("WATA provider initialized",
 			zap.String("base_url", a.config.Wata.BaseURL),
 			zap.Duration("link_ttl", a.config.Wata.LinkTTL),
+		)
+	}
+
+	// Platega.io провайдер (опционально, управляется PLATEGA_ENABLED).
+	// См. docs/services/platega-integration.md.
+	if a.config.Platega.Enabled {
+		plategaProvider := platega.NewProvider(platega.Config{
+			BaseURL:       a.config.Platega.BaseURL,
+			MerchantID:    a.config.Platega.MerchantID,
+			APISecret:     a.config.Platega.APISecret,
+			SuccessURL:    a.config.Platega.SuccessURL,
+			FailURL:       a.config.Platega.FailURL,
+			DefaultMethod: a.config.Platega.DefaultMethod,
+			Logger:        a.logger,
+		})
+		providers = append(providers, plategaProvider)
+		a.logger.Info("Platega provider initialized",
+			zap.String("base_url", a.config.Platega.BaseURL),
+			zap.Int("default_method", a.config.Platega.DefaultMethod),
 		)
 	}
 
@@ -186,10 +274,25 @@ func (a *App) Start() error {
 		}
 	}()
 
+	// Sentinel: фоновый цикл сканит таблицу payments на застрявшие в
+	// промежуточных статусах и добивает state machine. Контекст отменяется
+	// в Stop() — это сигнал воркеру выйти из цикла.
+	if a.sentinel != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		a.sentinelCancel = cancel
+		go a.sentinel.Start(ctx, &a.sentinelWg)
+	}
+
 	return nil
 }
 
 func (a *App) Stop(ctx context.Context) error {
+	// Остановим sentinel первым: после shutdown'а gRPC у нас уже не будет
+	// валидных gRPC connection'ов к соседям, и попытка ResumePaid упадёт.
+	if a.sentinelCancel != nil {
+		a.sentinelCancel()
+		a.sentinelWg.Wait()
+	}
 	a.grpcServer.GracefulStop()
 	return a.closer.CloseAll(ctx)
 }

@@ -27,13 +27,18 @@ func NewAuthHandler(authClient *client.AuthClient, subClient *client.Subscriptio
 
 type ValidateTelegramRequest struct {
 	InitData string `json:"init_data"`
+	// RefToken — опциональный реферальный токен (без префикса ref_),
+	// извлечённый фронтом из Telegram start_param. Используется только при
+	// создании нового юзера (см. auth-service).
+	RefToken string `json:"ref_token,omitempty"`
 }
 
 type ValidateTelegramResponse struct {
-	User           interface{} `json:"user"`
-	JWTToken       string      `json:"jwt_token"`
-	TrialActivated bool        `json:"trial_activated"`
-	Subscription   interface{} `json:"subscription,omitempty"`
+	User               interface{} `json:"user"`
+	JWTToken           string      `json:"jwt_token"`
+	TrialActivated     bool        `json:"trial_activated"`
+	Subscription       interface{} `json:"subscription,omitempty"`
+	ReferralRegistered bool        `json:"referral_registered,omitempty"`
 }
 
 func (h *AuthHandler) ValidateTelegramUser(w http.ResponseWriter, r *http.Request) {
@@ -44,7 +49,7 @@ func (h *AuthHandler) ValidateTelegramUser(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Call auth-service gRPC
-	resp, err := h.authClient.ValidateTelegramUser(r.Context(), req.InitData)
+	resp, err := h.authClient.ValidateTelegramUser(r.Context(), req.InitData, req.RefToken)
 	if err != nil {
 		h.logger.Error("Failed to validate telegram user", zap.Error(err))
 		http.Error(w, "Authentication failed", http.StatusUnauthorized)
@@ -68,7 +73,8 @@ func (h *AuthHandler) ValidateTelegramUser(w http.ResponseWriter, r *http.Reques
 			"updated_at":     resp.User.UpdatedAt,
 			"last_active_at": resp.User.LastActiveAt,
 		},
-		JWTToken: resp.JwtToken,
+		JWTToken:           resp.JwtToken,
+		ReferralRegistered: resp.ReferralRegistered,
 	}
 
 	// Для нового юзера — активируем пробный период и VPN.

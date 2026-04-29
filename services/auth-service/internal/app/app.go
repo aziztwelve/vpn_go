@@ -12,8 +12,10 @@ import (
 	"github.com/vpn/auth-service/internal/service"
 	"github.com/vpn/platform/pkg/closer"
 	pb "github.com/vpn/shared/pkg/proto/auth/v1"
+	referralpb "github.com/vpn/shared/pkg/proto/referral/v1"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 type App struct {
@@ -22,6 +24,8 @@ type App struct {
 	db         *pgxpool.Pool
 	grpcServer *grpc.Server
 	closer     *closer.Closer
+
+	referralConn *grpc.ClientConn // nil если REFERRAL_SERVICE_ADDR не задан
 }
 
 func New(logger *zap.Logger) (*App, error) {
@@ -85,12 +89,30 @@ func (a *App) initGRPC() error {
 	// Create repositories
 	userRepo := repository.NewUserRepository(a.db)
 
+	// Опциональный клиент к referral-service. Если REFERRAL_SERVICE_ADDR
+	// не задан — auth работает без реферальной интеграции.
+	var refClient service.ReferralClient
+	if a.config.Services.ReferralAddr != "" {
+		conn, err := grpc.NewClient(a.config.Services.ReferralAddr,
+			grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			return fmt.Errorf("dial referral-service: %w", err)
+		}
+		a.referralConn = conn
+		a.closer.Add(func(ctx context.Context) error { return a.referralConn.Close() })
+		refClient = referralpb.NewReferralServiceClient(conn)
+		a.logger.Info("Referral client configured",
+			zap.String("addr", a.config.Services.ReferralAddr),
+		)
+	}
+
 	// Create services
 	authService := service.NewAuthService(
 		userRepo,
 		a.config.JWT.Secret,
 		a.config.JWT.TTLHours,
 		a.config.Telegram.BotToken,
+		refClient,
 		a.logger,
 	)
 

@@ -13,6 +13,7 @@ type Config struct {
 	Services ServicesConfig
 	Telegram TelegramConfig
 	Wata     WataConfig
+	Platega  PlategaConfig
 	Log      LogConfig
 }
 
@@ -34,6 +35,10 @@ type DBConfig struct {
 type ServicesConfig struct {
 	SubscriptionAddr string
 	VPNAddr          string
+	AuthAddr         string
+	// ReferralAddr — опциональный адрес referral-service. Пустая строка →
+	// payment-service не дёргает реферальный хук, partner-комиссия не начисляется.
+	ReferralAddr string
 }
 
 // TelegramConfig — для вызова Bot API (createInvoiceLink, answerPreCheckoutQuery,
@@ -47,6 +52,11 @@ type TelegramConfig struct {
 	// в приветственном сообщении /start и в setChatMenuButton. Если пусто —
 	// /start-handler скипнет отправку WebApp-кнопки и покажет только текст.
 	MiniAppURL string
+	// StarsEnabled — включает Telegram Stars как платёжный провайдер.
+	// Управляется TELEGRAM_STARS_ENABLED, по умолчанию false. Бот всё равно
+	// нужен (для /start, /bonus, авторизации), поэтому BotToken остаётся
+	// required даже при StarsEnabled=false.
+	StarsEnabled bool
 }
 
 // WataConfig — настройки провайдера WATA H2H API.
@@ -59,6 +69,19 @@ type WataConfig struct {
 	SuccessURL  string        // куда редиректит после успешной оплаты
 	FailURL     string        // куда редиректит после неуспешной
 	LinkTTL     time.Duration // время жизни платёжной ссылки (10m…720h)
+}
+
+// PlategaConfig — настройки провайдера Platega.io.
+// Если Enabled=false — провайдер не регистрируется в payment-service,
+// остальные поля игнорируются.
+type PlategaConfig struct {
+	Enabled       bool
+	BaseURL       string // https://app.platega.io
+	MerchantID    string // UUID из ЛК Platega (X-MerchantId)
+	APISecret     string // API-ключ (X-Secret)
+	SuccessURL    string // куда редиректит после успешной оплаты
+	FailURL       string // куда редиректит после неуспешной
+	DefaultMethod int    // 0 = v2 (юзер выбирает на форме); 2/3/11/12/13 = v1 с фиксированным методом
 }
 
 type LogConfig struct {
@@ -90,11 +113,14 @@ func New() (*Config, error) {
 		Services: ServicesConfig{
 			SubscriptionAddr: getEnv("SUBSCRIPTION_SERVICE_ADDR", "localhost:50061"),
 			VPNAddr:          getEnv("VPN_SERVICE_ADDR", "localhost:50062"),
+			AuthAddr:         getEnv("AUTH_SERVICE_ADDR", "localhost:50060"),
+			ReferralAddr:     getEnv("REFERRAL_SERVICE_ADDR", ""),
 		},
 		Telegram: TelegramConfig{
 			BotToken:      getEnv("TELEGRAM_BOT_TOKEN", ""),
 			WebhookSecret: getEnv("TELEGRAM_WEBHOOK_SECRET", ""),
 			MiniAppURL:    getEnv("MINIAPP_URL", ""),
+			StarsEnabled:  getEnv("TELEGRAM_STARS_ENABLED", "false") == "true",
 		},
 		Wata: WataConfig{
 			Enabled:     getEnv("WATA_ENABLED", "false") == "true",
@@ -103,6 +129,15 @@ func New() (*Config, error) {
 			SuccessURL:  getEnv("WATA_SUCCESS_URL", ""),
 			FailURL:     getEnv("WATA_FAIL_URL", ""),
 			LinkTTL:     parseDurationDefault(getEnv("WATA_LINK_TTL", "72h"), 72*time.Hour),
+		},
+		Platega: PlategaConfig{
+			Enabled:       getEnv("PLATEGA_ENABLED", "false") == "true",
+			BaseURL:       getEnv("PLATEGA_BASE_URL", "https://app.platega.io"),
+			MerchantID:    getEnv("PLATEGA_MERCHANT_ID", ""),
+			APISecret:     getEnv("PLATEGA_API_SECRET", ""),
+			SuccessURL:    getEnv("PLATEGA_SUCCESS_URL", ""),
+			FailURL:       getEnv("PLATEGA_FAIL_URL", ""),
+			DefaultMethod: parseIntDefault(getEnv("PLATEGA_DEFAULT_METHOD", ""), 0),
 		},
 		Log: LogConfig{
 			Level: getEnv("LOG_LEVEL", "info"),
@@ -116,6 +151,18 @@ func New() (*Config, error) {
 func parseDurationDefault(s string, def time.Duration) time.Duration {
 	if d, err := time.ParseDuration(s); err == nil {
 		return d
+	}
+	return def
+}
+
+// parseIntDefault — int с дефолтом для опциональных env-настроек.
+// Пустая строка / нечитаемое значение → def.
+func parseIntDefault(s string, def int) int {
+	if s == "" {
+		return def
+	}
+	if v, err := strconv.Atoi(s); err == nil {
+		return v
 	}
 	return def
 }
@@ -136,6 +183,23 @@ func (c *Config) Validate() error {
 		}
 		if c.Wata.LinkTTL < 10*time.Minute || c.Wata.LinkTTL > 720*time.Hour {
 			return fmt.Errorf("WATA_LINK_TTL must be between 10m and 720h, got %s", c.Wata.LinkTTL)
+		}
+	}
+	if c.Platega.Enabled {
+		if c.Platega.MerchantID == "" {
+			return fmt.Errorf("PLATEGA_ENABLED=true but PLATEGA_MERCHANT_ID is empty")
+		}
+		if c.Platega.APISecret == "" {
+			return fmt.Errorf("PLATEGA_ENABLED=true but PLATEGA_API_SECRET is empty")
+		}
+		if c.Platega.SuccessURL == "" || c.Platega.FailURL == "" {
+			return fmt.Errorf("PLATEGA_ENABLED=true but success/fail redirect URLs are empty")
+		}
+		switch c.Platega.DefaultMethod {
+		case 0, 2, 3, 11, 12, 13:
+			// 0 = v2 без метода; 2/3/11/12/13 = валидные значения PaymentMethodInt
+		default:
+			return fmt.Errorf("PLATEGA_DEFAULT_METHOD must be one of 0,2,3,11,12,13, got %d", c.Platega.DefaultMethod)
 		}
 	}
 	return nil

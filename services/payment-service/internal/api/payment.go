@@ -95,6 +95,13 @@ func (a *PaymentAPI) HandleTelegramUpdate(ctx context.Context, req *pb.HandleTel
 	// Используем HandleWebhook для обратной совместимости
 	err := a.svc.HandleWebhook(ctx, "telegram_stars", req.GetUpdateJson(), "")
 	if err != nil {
+		// Если Stars отключены (TELEGRAM_STARS_ENABLED=false) — провайдер не
+		// зарегистрирован, но Telegram всё равно может слать updates (бот живёт
+		// для /start/bonus). Гracefully игнорим, чтобы Telegram не ретраил.
+		if errors.Is(err, service.ErrUnknownProvider) {
+			a.log.Debug("telegram update skipped: Stars provider disabled")
+			return &pb.HandleTelegramUpdateResponse{Handled: true, Action: "skipped_disabled"}, nil
+		}
 		a.log.Error("HandleWebhook failed", zap.Error(err))
 		return nil, status.Error(codes.Internal, "update handler failed: "+err.Error())
 	}

@@ -33,9 +33,12 @@ func (c *AuthClient) Close() error {
 	return c.conn.Close()
 }
 
-func (c *AuthClient) ValidateTelegramUser(ctx context.Context, initData string) (*pb.ValidateTelegramUserResponse, error) {
+// ValidateTelegramUser — проксирует на auth-service. refToken опционален
+// (передаётся фронтом, если в start_param был префикс ref_<token>).
+func (c *AuthClient) ValidateTelegramUser(ctx context.Context, initData, refToken string) (*pb.ValidateTelegramUserResponse, error) {
 	return c.client.ValidateTelegramUser(ctx, &pb.ValidateTelegramUserRequest{
 		InitData: initData,
+		RefToken: refToken,
 	})
 }
 

@@ -49,6 +49,12 @@ func (c *PaymentClient) ListUserPayments(ctx context.Context, userID int64, limi
 	})
 }
 
+func (c *PaymentClient) GetPayment(ctx context.Context, paymentID int64) (*pb.GetPaymentResponse, error) {
+	return c.client.GetPayment(ctx, &pb.GetPaymentRequest{
+		PaymentId: paymentID,
+	})
+}
+
 func (c *PaymentClient) HandleTelegramUpdate(ctx context.Context, rawJSON []byte) (*pb.HandleTelegramUpdateResponse, error) {
 	return c.client.HandleTelegramUpdate(ctx, &pb.HandleTelegramUpdateRequest{
 		UpdateJson: rawJSON,

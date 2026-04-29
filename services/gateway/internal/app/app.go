@@ -27,6 +27,7 @@ type App struct {
 	subscriptionClient *client.SubscriptionClient
 	vpnClient          *client.VPNClient
 	paymentClient      *client.PaymentClient
+	referralClient     *client.ReferralClient // nil если REFERRAL_SERVICE_ADDR не задан
 	closer             *closer.Closer
 }
 
@@ -93,6 +94,20 @@ func (a *App) initClients() error {
 	a.closer.Add(func(ctx context.Context) error {
 		return a.paymentClient.Close()
 	})
+
+	// Referral client (опционально)
+	if a.config.Services.ReferralAddr != "" {
+		referralClient, err := client.NewReferralClient(a.config.Services.ReferralAddr, a.logger)
+		if err != nil {
+			return fmt.Errorf("failed to create referral client: %w", err)
+		}
+		a.referralClient = referralClient
+		a.closer.Add(func(ctx context.Context) error {
+			return a.referralClient.Close()
+		})
+		a.logger.Info("Referral client initialized",
+			zap.String("addr", a.config.Services.ReferralAddr))
+	}
 
 	a.logger.Info("gRPC clients initialized",
 		zap.String("auth", a.config.Services.AuthAddr),
@@ -164,8 +179,6 @@ func (a *App) Start() error {
 		// ───── Публичные ручки (без JWT) ─────────────────────────────
 		// Логин через Telegram initData — откуда ещё брать токен.
 		r.Post("/auth/validate", authHandler.ValidateTelegramUser)
-		// Прайс-лист доступен и до логина (приветственный экран Mini App).
-		r.Get("/subscriptions/plans", subscriptionHandler.ListPlans)
 		r.Get("/subscriptions/plans/{planId}/pricing", subscriptionHandler.GetDevicePricing)
 		// Subscription config для VPN клиентов (Happ, V2RayNG, etc.).
 		// Ratelimit — защита от брутфорса токенов (см. subscriptionLimiter выше).
@@ -191,6 +204,8 @@ func (a *App) Start() error {
 			r.Get("/auth/users/{userId}", authHandler.GetUser)
 
 			// Subscriptions
+			// Прайс-лист — под JWT, чтобы знать user_id и показать тестовый план только определённым пользователям.
+			r.Get("/subscriptions/plans", subscriptionHandler.ListPlans)
 			r.Get("/subscriptions/active", subscriptionHandler.GetActiveSubscription)
 			r.Post("/subscriptions", subscriptionHandler.CreateSubscription)
 			r.Get("/subscriptions/history", subscriptionHandler.GetSubscriptionHistory)
@@ -207,10 +222,20 @@ func (a *App) Start() error {
 			// Payments
 			r.Post("/payments", paymentHandler.CreateInvoice)
 			r.Get("/payments", paymentHandler.ListPayments)
+			r.Get("/payments/{id}", paymentHandler.GetPayment)
 
 			// Channel Bonus
 			r.Post("/bonus/check-subscription", bonusHandler.CheckChannelSubscription)
 			r.Post("/bonus/claim", bonusHandler.ClaimChannelBonus)
+
+			// Referral program — только если referral-service подключён.
+			if a.referralClient != nil {
+				referralHandler := handler.NewReferralHandler(a.referralClient, a.logger)
+				r.Get("/referral/link", referralHandler.GetLink)
+				r.Get("/referral/stats", referralHandler.GetStats)
+				r.Post("/referral/withdrawal", referralHandler.CreateWithdrawal)
+				r.Get("/referral/withdrawals", referralHandler.ListWithdrawals)
+			}
 		})
 	})
 
