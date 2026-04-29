@@ -30,8 +30,8 @@ COUNTRY=""
 HOST=""
 PORT=443
 MAX_CONN=1000
-DEST="github.com:443"
-SNI="github.com"
+DEST="apple.com:443"
+SNI="apple.com"
 INBOUND_TAG="vless-reality-in"
 DESCRIPTION=""
 
