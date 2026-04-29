@@ -19,8 +19,16 @@
 #       --location "Frankfurt" \
 #       --country DE \
 #       --host "de01.maydavpn.com" \
-#       --port 443 \
+#       --port 8443 \
 #       --max-conn 2000
+#
+# Почему по умолчанию :8443, а не :443:
+#   В РФ ТСПУ/РКН активно режут TLS-handshake (дропают Server Hello)
+#   на :443 для известных VPN-ASN — клиент видит «SSL connection
+#   timeout», хотя TCP проходит. На нестандартных портах (:8443, :2053
+#   и т.п.) такого правила нет. Подтверждено на 29.04.2026 на FI и NL
+#   через mtr 0% loss + curl --resolve с RF-VPS. См. также memory от
+#   29.04.2026 раздел «:443 dpi block».
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
@@ -28,7 +36,7 @@ NAME=""
 LOCATION=""
 COUNTRY=""
 HOST=""
-PORT=443
+PORT=8443
 MAX_CONN=1000
 DEST="apple.com:443"
 SNI="apple.com"
