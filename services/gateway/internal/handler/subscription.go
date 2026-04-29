@@ -36,7 +36,7 @@ func (h *SubscriptionHandler) ListPlans(w http.ResponseWriter, r *http.Request) 
 	uid, _ := authmw.UserIDFromContext(r.Context())
 	plans := make([]map[string]interface{}, 0, len(resp.Plans))
 	for _, plan := range resp.Plans {
-		if plan.Id == 100 && uid != 13 { continue } // тест-план 1₽ — только aziztwelve (user_id=13)
+		if plan.Id == 100 && uid != 13 && uid != 18 { continue } // тест-план 3₽ — aziztwelve (id=13), mans_lll (id=18)
 		plans = append(plans, map[string]interface{}{
 			"id":            plan.Id,
 			"name":          plan.Name,
