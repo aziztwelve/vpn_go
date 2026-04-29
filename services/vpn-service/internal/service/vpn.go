@@ -472,6 +472,47 @@ func (s *VPNService) GetSubscriptionToken(ctx context.Context, userID int64) (st
 	return vpnUser.SubscriptionToken, expiresAt, nil
 }
 
+// RegisterDeviceTouchResult — итог одного touch'а устройства.
+type RegisterDeviceTouchResult struct {
+	ConnectionID     int64
+	DeviceIdentifier string // нормализованный лейбл
+	Created          bool   // true если строка только что создана
+}
+
+// RegisterDeviceTouch — best-effort регистрация устройства, тянущего
+// subscription URL. Резолвит token → vpn_user, нормализует UA, апсёртит
+// строку в active_connections (server_id=NULL).
+//
+// Не валит весь subscription-fetch если что-то упадёт: gateway вызывает
+// этот RPC асинхронно и логирует ошибку, не блокируя ответ клиенту.
+func (s *VPNService) RegisterDeviceTouch(ctx context.Context, subscriptionToken, userAgent string) (*RegisterDeviceTouchResult, error) {
+	if subscriptionToken == "" {
+		return nil, errors.New("subscription_token is required")
+	}
+
+	// Резолвим token → vpn_user. Если подписка истекла/не активна — здесь
+	// будет error, но в этот сервис мы попадаем ТОЛЬКО после успешного
+	// GetSubscriptionConfig у gateway, т.е. при нормальной работе сюда
+	// доходим всегда с живым токеном. На всякий случай — возвращаем ошибку,
+	// gateway её залогирует и забудет.
+	vpnUser, _, _, err := s.repo.GetSubscriptionConfigByToken(ctx, subscriptionToken)
+	if err != nil {
+		return nil, fmt.Errorf("resolve subscription token: %w", err)
+	}
+
+	device := NormalizeUserAgent(userAgent)
+	conn, created, err := s.repo.UpsertDeviceTouch(ctx, vpnUser.ID, device)
+	if err != nil {
+		return nil, fmt.Errorf("upsert device touch: %w", err)
+	}
+
+	return &RegisterDeviceTouchResult{
+		ConnectionID:     conn.ID,
+		DeviceIdentifier: conn.DeviceIdentifier,
+		Created:          created,
+	}, nil
+}
+
 // isNotFound — эвристика Xray: при RemoveUser на несуществующего юзера.
 func isNotFound(err error) bool {
 	if err == nil {

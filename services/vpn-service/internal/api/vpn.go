@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/vpn/vpn-service/internal/model"
 	"github.com/vpn/vpn-service/internal/service"
@@ -249,6 +250,38 @@ func (a *VPNAPI) GetSubscriptionToken(ctx context.Context, req *pb.GetSubscripti
 	return &pb.GetSubscriptionTokenResponse{
 		SubscriptionToken: token,
 		ExpiresAt:         expiresAt.UTC().Format("2006-01-02T15:04:05Z"),
+	}, nil
+}
+
+// RegisterDeviceTouch — best-effort upsert строки про устройство, тянущее
+// subscription URL. См. service/vpn.go:RegisterDeviceTouch и service/ua.go.
+//
+// Ошибки: InvalidArgument если token пустой; NotFound если подписка истекла;
+// Internal на всё остальное (БД упала и т.п.). Gateway вызывает асинхронно и
+// игнорит результат — UI оживает на следующем GET /vpn/connections.
+func (a *VPNAPI) RegisterDeviceTouch(ctx context.Context, req *pb.RegisterDeviceTouchRequest) (*pb.RegisterDeviceTouchResponse, error) {
+	if req.GetSubscriptionToken() == "" {
+		return nil, status.Error(codes.InvalidArgument, "subscription_token is required")
+	}
+	res, err := a.service.RegisterDeviceTouch(ctx, req.GetSubscriptionToken(), req.GetUserAgent())
+	if err != nil {
+		a.logger.Info("RegisterDeviceTouch failed",
+			zap.String("ua", req.GetUserAgent()),
+			zap.Error(err),
+		)
+		// Если токен не нашёлся в БД — NotFound, остальное — Internal.
+		// Эвристика по тексту: репо оборачивает pgx.ErrNoRows в fmt.Errorf,
+		// и проверять его типизировано из api-слоя неудобно.
+		if strings.Contains(strings.ToLower(err.Error()), "no rows") ||
+			strings.Contains(strings.ToLower(err.Error()), "not found") {
+			return nil, status.Error(codes.NotFound, "subscription token not found or expired")
+		}
+		return nil, status.Error(codes.Internal, "failed to register device touch")
+	}
+	return &pb.RegisterDeviceTouchResponse{
+		ConnectionId:     res.ConnectionID,
+		DeviceIdentifier: res.DeviceIdentifier,
+		Created:          res.Created,
 	}, nil
 }
 

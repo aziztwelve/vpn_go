@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -76,6 +77,31 @@ func (h *SubscriptionConfigHandler) SubscriptionConfig(w http.ResponseWriter, r 
 		h.logger.Warn("active subscription but no active servers",
 			zap.String("token_prefix", safePrefix(token)))
 	}
+
+	// Best-effort device-touch: фиксируем "клиент-приложение тянуло
+	// подписку". Делаем в горутине, чтобы не задерживать ответ Xray-клиенту.
+	// Ошибки только логируем — UI оживёт на следующем GET /vpn/connections.
+	// Свой context (не r.Context()) — иначе он отменится сразу после ответа.
+	userAgent := r.Header.Get("User-Agent")
+	go func(tok, ua string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		resp, err := h.vpnClient.RegisterDeviceTouch(ctx, tok, ua)
+		if err != nil {
+			h.logger.Debug("device touch failed",
+				zap.String("token_prefix", safePrefix(tok)),
+				zap.String("ua", ua),
+				zap.Error(err),
+			)
+			return
+		}
+		if resp.GetCreated() {
+			h.logger.Info("device touch registered",
+				zap.String("token_prefix", safePrefix(tok)),
+				zap.String("device", resp.GetDeviceIdentifier()),
+			)
+		}
+	}(token, userAgent)
 
 	// HAPP/v2rayN/Hiddify distinguish legitimate VPN subscriptions from generic
 	// text by a set of well-known headers. Без них клиент пытается распарсить

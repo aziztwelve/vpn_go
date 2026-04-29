@@ -79,3 +79,13 @@ func (c *VPNClient) GetSubscriptionConfig(ctx context.Context, token string) (*p
 func (c *VPNClient) GetSubscriptionToken(ctx context.Context, userID int64) (*pb.GetSubscriptionTokenResponse, error) {
 	return c.client.GetSubscriptionToken(ctx, &pb.GetSubscriptionTokenRequest{UserId: userID})
 }
+
+// RegisterDeviceTouch — best-effort UPSERT записи в active_connections для
+// клиент-приложения, тянущего subscription URL. Вызывается ТОЛЬКО асинхронно
+// из subscription_config handler'а: ошибки не блокируют выдачу конфига.
+func (c *VPNClient) RegisterDeviceTouch(ctx context.Context, subscriptionToken, userAgent string) (*pb.RegisterDeviceTouchResponse, error) {
+	return c.client.RegisterDeviceTouch(ctx, &pb.RegisterDeviceTouchRequest{
+		SubscriptionToken: subscriptionToken,
+		UserAgent:         userAgent,
+	})
+}

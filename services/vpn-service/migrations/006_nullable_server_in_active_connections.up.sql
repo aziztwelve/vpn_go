@@ -1,0 +1,13 @@
+-- Делаем server_id NULL-able в active_connections, чтобы поддержать
+-- модель "device-touch без привязки к конкретному серверу" — приходит из
+-- subscription-flow (`GET /api/v1/subscription/{token}`), где клиентское
+-- приложение тянет конфиги ВСЕХ серверов одной ссылкой и server_id
+-- неизвестен на момент touch'а.
+--
+-- Heartbeat будет обновлять last_seen по vpn_user_id (как и раньше),
+-- а строка-устройство создаётся в gateway при subscription-fetch'е,
+-- ключ — (vpn_user_id, device_identifier=<нормализованный User-Agent>).
+--
+-- Старые строки (созданные через GetVLESSLink) сохраняют server_id NOT NULL
+-- по факту; миграция их не трогает.
+ALTER TABLE active_connections ALTER COLUMN server_id DROP NOT NULL;

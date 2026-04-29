@@ -41,6 +41,14 @@ service VPNService {
   // (gateway проксирует с JWT), чтобы собрать URL подписки на фронте.
   // Если vpn_user не создан (нет активной подписки) — NotFound.
   rpc GetSubscriptionToken(GetSubscriptionTokenRequest) returns (GetSubscriptionTokenResponse);
+
+  // RegisterDeviceTouch — best-effort upsert строки в active_connections
+  // когда клиент-приложение тянет subscription URL. Передаём "сырое"
+  // значение User-Agent, vpn-service нормализует во вменяемый device_identifier
+  // (см. internal/service/ua.go). Сервер не привязывается — server_id=NULL,
+  // потому что subscription отдаёт конфиги всех серверов сразу.
+  // Идемпотентно по (vpn_user_id, device_identifier): обновляет last_seen.
+  rpc RegisterDeviceTouch(RegisterDeviceTouchRequest) returns (RegisterDeviceTouchResponse);
 }
 
 message DisableVPNUserRequest {
@@ -180,9 +188,33 @@ message Server {
 message ActiveConnection {
   int64 id = 1;
   int64 vpn_user_id = 2;
+  // server_id может быть 0 для "subscription-touch" записей (клиент-приложение
+  // тянуло subscription URL и явного сервера ещё нет). UI должен трактовать
+  // 0 как "сервер не определён" и server_name тогда пустой.
   int32 server_id = 3;
   string server_name = 4;
   string device_identifier = 5;
   string connected_at = 6;
   string last_seen = 7;
+}
+
+// RegisterDeviceTouch — для subscription-flow. См. RPC выше.
+message RegisterDeviceTouchRequest {
+  // Берём именно subscription_token (а не user_id), чтобы handler в gateway
+  // не делал лишний lookup — он и так уже по token'у работает. vpn-service
+  // сам резолвит token → vpn_user.
+  string subscription_token = 1;
+  // Сырой User-Agent. Может быть пустым (некоторые клиенты не шлют) — тогда
+  // нормализуем в "Unknown client".
+  string user_agent = 2;
+}
+
+message RegisterDeviceTouchResponse {
+  // ID строки в active_connections (новой или существующей).
+  int64 connection_id = 1;
+  // Нормализованный лейбл, который записан в device_identifier
+  // ("Happ / iOS", "Hiddify / Android", "Unknown client", ...).
+  string device_identifier = 2;
+  // true если запись только что создана (для метрик/логов).
+  bool created = 3;
 }

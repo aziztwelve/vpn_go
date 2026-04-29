@@ -318,9 +318,12 @@ func (r *VPNRepository) CountActiveDevices(ctx context.Context, vpnUserID int64,
 	return count, nil
 }
 
-// UpsertActiveConnection — создать или обновить запись about устройстве.
+// UpsertActiveConnection — создать или обновить запись про устройстве.
 // Уникальный ключ: (vpn_user_id, device_identifier). При обновлении
 // бьётся last_seen=NOW(), server_id меняется на актуальный.
+//
+// Используется legacy-путём GetVLESSLink (per-server). Для subscription-
+// fetch'а (без конкретного сервера) есть UpsertDeviceTouch ниже.
 func (r *VPNRepository) UpsertActiveConnection(ctx context.Context, vpnUserID int64, serverID int32, deviceIdentifier string) (*model.ActiveConnection, error) {
 	query := `
 		INSERT INTO active_connections (vpn_user_id, server_id, device_identifier, connected_at, last_seen)
@@ -328,7 +331,7 @@ func (r *VPNRepository) UpsertActiveConnection(ctx context.Context, vpnUserID in
 		ON CONFLICT (vpn_user_id, device_identifier) DO UPDATE SET
 			server_id = EXCLUDED.server_id,
 			last_seen = NOW()
-		RETURNING id, vpn_user_id, server_id, device_identifier, connected_at, last_seen
+		RETURNING id, vpn_user_id, COALESCE(server_id, 0), device_identifier, connected_at, last_seen
 	`
 	conn := &model.ActiveConnection{}
 	err := r.db.QueryRow(ctx, query, vpnUserID, serverID, deviceIdentifier).Scan(
@@ -340,6 +343,33 @@ func (r *VPNRepository) UpsertActiveConnection(ctx context.Context, vpnUserID in
 	return conn, nil
 }
 
+// UpsertDeviceTouch — UPSERT без server_id (server_id IS NULL). Вызывается
+// gateway'ем при запросе клиентом subscription URL: device_identifier =
+// нормализованный User-Agent. Если строка уже была (с server_id привязанным
+// через GetVLESSLink) — server_id НЕ затирается, обновляется только last_seen.
+//
+// Возвращает строку и флаг created (true если только что создана).
+func (r *VPNRepository) UpsertDeviceTouch(ctx context.Context, vpnUserID int64, deviceIdentifier string) (*model.ActiveConnection, bool, error) {
+	query := `
+		INSERT INTO active_connections (vpn_user_id, server_id, device_identifier, connected_at, last_seen)
+		VALUES ($1, NULL, $2, NOW(), NOW())
+		ON CONFLICT (vpn_user_id, device_identifier) DO UPDATE SET
+			last_seen = NOW()
+		RETURNING id, vpn_user_id, COALESCE(server_id, 0), device_identifier, connected_at, last_seen,
+		          (xmax = 0) AS inserted
+	`
+	conn := &model.ActiveConnection{}
+	var inserted bool
+	err := r.db.QueryRow(ctx, query, vpnUserID, deviceIdentifier).Scan(
+		&conn.ID, &conn.VPNUserID, &conn.ServerID, &conn.DeviceIdentifier, &conn.ConnectedAt, &conn.LastSeen,
+		&inserted,
+	)
+	if err != nil {
+		return nil, false, fmt.Errorf("upsert device touch: %w", err)
+	}
+	return conn, inserted, nil
+}
+
 // UpdateLastSeenByVPNUser — обновляет last_seen=NOW() для ВСЕХ устройств
 // юзера. Вызывается heartbeat-ом когда Xray показал рост трафика.
 // См. ограничение модели в docs/services/device-limit.md.
@@ -348,10 +378,12 @@ func (r *VPNRepository) UpdateLastSeenByVPNUser(ctx context.Context, vpnUserID i
 	return err
 }
 
-// Active Connections
+// Active Connections.
+// COALESCE(server_id, 0) — для записей из subscription-touch'а server_id IS NULL.
+// API-слой трактует 0 как "сервер не привязан" и не пытается резолвить имя.
 func (r *VPNRepository) GetActiveConnections(ctx context.Context, vpnUserID int64) ([]*model.ActiveConnection, error) {
 	query := `
-		SELECT ac.id, ac.vpn_user_id, ac.server_id, ac.device_identifier, ac.connected_at, ac.last_seen
+		SELECT ac.id, ac.vpn_user_id, COALESCE(ac.server_id, 0), ac.device_identifier, ac.connected_at, ac.last_seen
 		FROM active_connections ac
 		WHERE ac.vpn_user_id = $1
 		ORDER BY ac.last_seen DESC
