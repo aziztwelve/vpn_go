@@ -84,6 +84,34 @@ func (a *AuthAPI) UpdateUserRole(ctx context.Context, req *pb.UpdateUserRoleRequ
 	}, nil
 }
 
+// SelfUpdateRole — self-service смена своей роли. Принимает user_id из
+// JWT (gateway проставляет) и role ∈ {user, partner}. admin запрещён.
+// Возвращает свежий JWT с обновлённой ролью.
+func (a *AuthAPI) SelfUpdateRole(ctx context.Context, req *pb.SelfUpdateRoleRequest) (*pb.SelfUpdateRoleResponse, error) {
+	if req.UserId == 0 {
+		return nil, status.Error(codes.InvalidArgument, "user_id is required")
+	}
+	if req.Role != model.RoleUser && req.Role != model.RolePartner {
+		return nil, status.Error(codes.InvalidArgument, "role must be 'user' or 'partner'")
+	}
+
+	user, token, err := a.authService.SelfUpdateRole(ctx, req.UserId, req.Role)
+	if err != nil {
+		a.logger.Error("Failed to self-update role", zap.Error(err))
+		return nil, status.Error(codes.Internal, "failed to update role")
+	}
+
+	a.logger.Info("user role self-updated",
+		zap.Int64("user_id", user.ID),
+		zap.String("role", user.Role),
+	)
+
+	return &pb.SelfUpdateRoleResponse{
+		User:     modelUserToProto(user),
+		JwtToken: token,
+	}, nil
+}
+
 func (a *AuthAPI) BanUser(ctx context.Context, req *pb.BanUserRequest) (*pb.BanUserResponse, error) {
 	if req.UserId == 0 {
 		return nil, status.Error(codes.InvalidArgument, "user_id is required")

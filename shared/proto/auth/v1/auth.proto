@@ -13,6 +13,12 @@ service AuthService {
   
   // Обновление роли пользователя (только для админов)
   rpc UpdateUserRole(UpdateUserRoleRequest) returns (UpdateUserRoleResponse);
+
+  // Self-service смена своей роли (user ↔ partner). Юзер дёргает сам.
+  // Запрещено переключаться в admin или менять чужую роль.
+  // Возвращает обновлённого юзера + СВЕЖИЙ JWT (со старым role в payload
+  // фронт получит ошибку при следующем запросе).
+  rpc SelfUpdateRole(SelfUpdateRoleRequest) returns (SelfUpdateRoleResponse);
   
   // Бан/разбан пользователя (только для админов)
   rpc BanUser(BanUserRequest) returns (BanUserResponse);
@@ -52,6 +58,16 @@ message UpdateUserRoleRequest {
 
 message UpdateUserRoleResponse {
   User user = 1;
+}
+
+message SelfUpdateRoleRequest {
+  int64 user_id = 1; // Из JWT — gateway проставляет
+  string role = 2;   // user | partner (admin запрещён)
+}
+
+message SelfUpdateRoleResponse {
+  User user = 1;
+  string jwt_token = 2; // Свежий JWT с новой ролью в payload
 }
 
 message BanUserRequest {

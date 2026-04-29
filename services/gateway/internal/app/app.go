@@ -202,6 +202,9 @@ func (a *App) Start() error {
 
 			// Auth
 			r.Get("/auth/users/{userId}", authHandler.GetUser)
+			// Self-service смена роли (user ↔ partner). Возвращает свежий
+			// JWT, фронт обязан заменить старый. См. handler/auth.go.
+			r.Post("/auth/me/role", authHandler.SelfUpdateRole)
 
 			// Subscriptions
 			// Прайс-лист — под JWT, чтобы знать user_id и показать тестовый план только определённым пользователям.

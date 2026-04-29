@@ -317,6 +317,33 @@ func (s *AuthService) UpdateUserRole(ctx context.Context, userID int64, role str
 	return s.userRepo.UpdateUserRole(ctx, userID, role)
 }
 
+// SelfUpdateRole — self-service смена своей роли. Юзер может переключаться
+// между 'user' и 'partner' без модерации. Перевыпускает JWT с новой ролью
+// в payload, чтобы middleware'ы видели актуальное значение сразу.
+//
+// Запрещено:
+//   - role='admin' (admin выдаёт только сам админ через UpdateUserRole)
+//   - userID == 0 (gateway проставляет из JWT)
+func (s *AuthService) SelfUpdateRole(ctx context.Context, userID int64, role string) (*model.User, string, error) {
+	if userID == 0 {
+		return nil, "", fmt.Errorf("user_id is required")
+	}
+	if role != "user" && role != "partner" {
+		return nil, "", fmt.Errorf("role must be 'user' or 'partner', got %q", role)
+	}
+
+	user, err := s.userRepo.UpdateUserRole(ctx, userID, role)
+	if err != nil {
+		return nil, "", fmt.Errorf("update role: %w", err)
+	}
+
+	token, err := s.GenerateJWT(user.ID, user.Role)
+	if err != nil {
+		return nil, "", fmt.Errorf("generate JWT: %w", err)
+	}
+	return user, token, nil
+}
+
 // BanUser банит/разбанивает пользователя
 func (s *AuthService) BanUser(ctx context.Context, userID int64, isBanned bool) (*model.User, error) {
 	return s.userRepo.BanUser(ctx, userID, isBanned)

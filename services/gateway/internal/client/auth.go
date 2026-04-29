@@ -53,3 +53,12 @@ func (c *AuthClient) VerifyToken(ctx context.Context, token string) (*pb.VerifyT
 		Token: token,
 	})
 }
+
+// SelfUpdateRole — self-service смена роли (user ↔ partner).
+// userID берётся из JWT в gateway-handler'е. Возвращает свежий JWT.
+func (c *AuthClient) SelfUpdateRole(ctx context.Context, userID int64, role string) (*pb.SelfUpdateRoleResponse, error) {
+	return c.client.SelfUpdateRole(ctx, &pb.SelfUpdateRoleRequest{
+		UserId: userID,
+		Role:   role,
+	})
+}

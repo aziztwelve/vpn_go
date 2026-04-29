@@ -139,3 +139,70 @@ func (h *AuthHandler) GetUser(w http.ResponseWriter, r *http.Request) {
 	// TODO: Implement
 	w.WriteHeader(http.StatusNotImplemented)
 }
+
+// SelfUpdateRoleRequest — payload для POST /api/v1/auth/me/role.
+// Меняет роль ТЕКУЩЕГО юзера (user_id берём из JWT). admin запрещён.
+type SelfUpdateRoleRequest struct {
+	Role string `json:"role"` // "user" | "partner"
+}
+
+// SelfUpdateRoleResponse — обновлённый юзер + СВЕЖИЙ JWT с новой ролью.
+type SelfUpdateRoleResponse struct {
+	User     interface{} `json:"user"`
+	JWTToken string      `json:"jwt_token"`
+}
+
+// SelfUpdateRole — POST /api/v1/auth/me/role (защищённая JWT).
+// Юзер может self-service переключаться между 'user' и 'partner' без
+// модерации. После смены клиент должен заменить старый JWT на новый,
+// который вернётся в ответе — иначе middleware (gateway или другие
+// сервисы) увидит старую роль до истечения TTL.
+func (h *AuthHandler) SelfUpdateRole(w http.ResponseWriter, r *http.Request) {
+	userID, ok := userIDFromRequest(w, r)
+	if !ok {
+		return
+	}
+
+	var req SelfUpdateRoleRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	// Гейтвей подсаниизирует — admin не пропустим даже если бэкенд
+	// проверяет дополнительно.
+	if req.Role != "user" && req.Role != "partner" {
+		http.Error(w, `role must be "user" or "partner"`, http.StatusBadRequest)
+		return
+	}
+
+	resp, err := h.authClient.SelfUpdateRole(r.Context(), userID, req.Role)
+	if err != nil {
+		h.logger.Error("SelfUpdateRole failed",
+			zap.Int64("user_id", userID),
+			zap.String("role", req.Role),
+			zap.Error(err))
+		http.Error(w, "Failed to update role", http.StatusInternalServerError)
+		return
+	}
+
+	out := SelfUpdateRoleResponse{
+		User: map[string]interface{}{
+			"id":             resp.User.Id,
+			"telegram_id":    resp.User.TelegramId,
+			"username":       resp.User.Username,
+			"first_name":     resp.User.FirstName,
+			"last_name":      resp.User.LastName,
+			"photo_url":      resp.User.PhotoUrl,
+			"language_code":  resp.User.LanguageCode,
+			"role":           resp.User.Role,
+			"is_banned":      resp.User.IsBanned,
+			"balance":        resp.User.Balance,
+			"created_at":     resp.User.CreatedAt,
+			"updated_at":     resp.User.UpdatedAt,
+			"last_active_at": resp.User.LastActiveAt,
+		},
+		JWTToken: resp.JwtToken,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
