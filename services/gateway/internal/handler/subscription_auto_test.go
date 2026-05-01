@@ -175,8 +175,8 @@ func TestBuildBurstObservatory_Defaults(t *testing.T) {
 }
 
 // TestWriteJSONFormat_AddsAutoWhenMultipleServers — на 2+ серверах в JSON-ответе
-// должна появиться запись «🌐 АВТО ВЫБОР» В КОНЦЕ списка (после 3×N per-server-
-// per-profile конфигов).
+// должна появиться запись «🌐 АВТО ВЫБОР» В КОНЦЕ списка (один profileFull-
+// конфиг на каждый сервер + auto = N+1 entries).
 func TestWriteJSONFormat_AddsAutoWhenMultipleServers(t *testing.T) {
 	cfg := &pb.GetSubscriptionConfigResponse{
 		VpnUser: fixtureUser(),
@@ -195,8 +195,8 @@ func TestWriteJSONFormat_AddsAutoWhenMultipleServers(t *testing.T) {
 		t.Fatalf("decode body: %v", err)
 	}
 
-	// 2 servers × 3 profiles + 1 auto = 7 entries.
-	want := len(cfg.Servers)*len(defaultProfiles) + 1
+	// 2 servers + 1 auto = 3 entries.
+	want := len(cfg.Servers) + 1
 	if len(got) != want {
 		t.Errorf("want %d configs, got %d", want, len(got))
 	}
@@ -213,7 +213,8 @@ func TestWriteJSONFormat_AddsAutoWhenMultipleServers(t *testing.T) {
 }
 
 // TestWriteJSONFormat_NoAutoForSingleServer — с одним сервером auto-балансер
-// бессмыслен (один кандидат). Должно быть ровно 3×1 = 3 конфига.
+// бессмыслен (один кандидат). Должна быть ровно 1 запись (profileFull на
+// единственный сервер).
 func TestWriteJSONFormat_NoAutoForSingleServer(t *testing.T) {
 	cfg := &pb.GetSubscriptionConfigResponse{
 		VpnUser: fixtureUser(),
@@ -228,8 +229,8 @@ func TestWriteJSONFormat_NoAutoForSingleServer(t *testing.T) {
 		t.Fatalf("decode body: %v", err)
 	}
 
-	if len(got) != len(defaultProfiles) {
-		t.Errorf("want %d configs (no auto for single server), got %d", len(defaultProfiles), len(got))
+	if len(got) != 1 {
+		t.Errorf("want 1 config (no auto for single server), got %d", len(got))
 	}
 
 	// Ни в одной из записей не должно быть burstObservatory.

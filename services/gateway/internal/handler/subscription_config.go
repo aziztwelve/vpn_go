@@ -247,13 +247,15 @@ func serverRemark(srv *pb.Server) string {
 	return fmt.Sprintf("%s %s", flagEmoji(srv.GetCountryCode()), srv.GetName())
 }
 
-// writeJSONFormat — массив полных Xray-конфигов, по одному на (сервер × профиль).
-// Так HAPP/v2rayN видят 3 × N "серверов" в списке со своими routing-стратегиями.
+// writeJSONFormat — массив полных Xray-конфигов: один «⚡ Обычный VPN» на
+// сервер + 🌐 АВТО ВЫБОР в конце (если серверов ≥2).
 //
-// 3 профиля:
-//  1. 🚀 Обход блокировок — split-tunnel: RU/Apple/локалки → direct, остальное → proxy.
-//  2. 🔒 Весь трафик — только локалки → direct, всё остальное → proxy.
-//  3. 🎬 YouTube без рекламы — YT через proxy + AdGuard DNS, RU/локалки → direct.
+// Раньше эмитились 3 профиля (⚡/🚀/🎬) на каждый сервер — это сильно
+// раздувало список в HAPP (N серверов = 3N+1 элементов). Сейчас оставляем
+// один универсальный режим (`profileFull` = весь трафик через VPN) — он
+// безопасный дефолт; юзер при желании выбирает конкретную страну. Bypass и
+// YouTube-режимы доступны через base64-формат (для не-HAPP клиентов) или
+// будут возвращены как отдельные deeplink'и/настройки в Mini App.
 //
 // При наличии ≥2 активных серверов в КОНЕЦ списка добавляется ещё одна
 // запись «🌐 АВТО ВЫБОР» — конфиг с burstObservatory + leastLoad balancer,
@@ -266,17 +268,15 @@ func writeJSONFormat(w http.ResponseWriter, cfg *pb.GetSubscriptionConfigRespons
 	servers := cfg.GetServers()
 	user := cfg.GetVpnUser()
 
-	estimate := len(defaultProfiles) * len(servers)
+	estimate := len(servers)
 	if len(servers) >= 2 {
 		estimate++
 	}
 	configs := make([]map[string]interface{}, 0, estimate)
 
-	// Existing behaviour: per-server × per-profile конфиги.
+	// Один профиль (profileFull = ⚡ Обычный VPN) на каждый сервер.
 	for _, srv := range servers {
-		for _, p := range defaultProfiles {
-			configs = append(configs, buildXrayConfig(user, srv, p))
-		}
+		configs = append(configs, buildXrayConfig(user, srv, profileFull))
 	}
 
 	// Auto-balancer добавляем В КОНЕЦ списка чтобы не менять "default selection"
