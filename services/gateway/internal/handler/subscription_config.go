@@ -236,14 +236,35 @@ func serverRemark(srv *pb.Server) string {
 //  2. 🔒 Весь трафик — только локалки → direct, всё остальное → proxy.
 //  3. 🎬 YouTube без рекламы — YT через proxy + AdGuard DNS, RU/локалки → direct.
 //
+// При наличии ≥2 активных серверов в КОНЕЦ списка добавляется ещё одна
+// запись «🌐 АВТО ВЫБОР» — конфиг с burstObservatory + leastLoad balancer,
+// который сам выбирает лучший по RTT VPS из всех доступных. См.
+// buildAutoXrayConfig в subscription_auto.go.
+//
 // Формат массива JSON-конфигов — HAPP-specific расширение subscription:
 // клиент сам разбирает, добавляет каждый объект как сервер.
 func writeJSONFormat(w http.ResponseWriter, cfg *pb.GetSubscriptionConfigResponse) {
-	configs := make([]map[string]interface{}, 0, len(defaultProfiles)*len(cfg.GetServers()))
-	for _, srv := range cfg.GetServers() {
+	servers := cfg.GetServers()
+	user := cfg.GetVpnUser()
+
+	estimate := len(defaultProfiles) * len(servers)
+	if len(servers) >= 2 {
+		estimate++
+	}
+	configs := make([]map[string]interface{}, 0, estimate)
+
+	// Existing behaviour: per-server × per-profile конфиги.
+	for _, srv := range servers {
 		for _, p := range defaultProfiles {
-			configs = append(configs, buildXrayConfig(cfg.GetVpnUser(), srv, p))
+			configs = append(configs, buildXrayConfig(user, srv, p))
 		}
+	}
+
+	// Auto-balancer добавляем В КОНЕЦ списка чтобы не менять "default selection"
+	// у уже подключившихся клиентов (HAPP по умолчанию выбирает первую запись).
+	// Эмитим только когда серверов ≥2, иначе balancer бессмыслен.
+	if len(servers) >= 2 {
+		configs = append(configs, buildAutoXrayConfig(user, servers))
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
