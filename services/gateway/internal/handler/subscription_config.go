@@ -135,7 +135,26 @@ func (h *SubscriptionConfigHandler) SubscriptionConfig(w http.ResponseWriter, r 
 	w.Header().Set("Ping-Type", "proxy-head")
 	w.Header().Set("Sub-Expire", "1")
 
-	if r.URL.Query().Get("format") == "json" {
+	// Выбор формата:
+	//   1. Явный `?format=json` — приоритет, отдаём JSON (HAPP-extension).
+	//   2. Явный `?format=base64` — приоритет, отдаём base64 (тоже работает в HAPP).
+	//   3. Без query: UA-sniff. HAPP шлёт UA вида `Happ/<ver>/<platform>/...`
+	//      на всех платформах (iOS/Android/Linux/Windows). Он умеет JSON-формат
+	//      и только в JSON виден `🌐 АВТО ВЫБОР` (balancer не выражается через
+	//      VLESS-URI). Поэтому HAPP'у дефолтим JSON, всем остальным —
+	//      универсальный base64.
+	//
+	// Это backwards-compat: ранее без query всегда был base64, теперь HAPP
+	// при auto-update подписки сам начнёт получать обновлённый JSON-конфиг.
+	switch r.URL.Query().Get("format") {
+	case "json":
+		writeJSONFormat(w, cfg)
+		return
+	case "base64":
+		writeBase64Format(w, cfg, h.defaultCountry)
+		return
+	}
+	if strings.Contains(userAgent, "Happ/") {
 		writeJSONFormat(w, cfg)
 		return
 	}
