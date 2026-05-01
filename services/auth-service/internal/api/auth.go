@@ -154,6 +154,30 @@ func (a *AuthAPI) SetPendingReferral(ctx context.Context, req *pb.SetPendingRefe
 	return &pb.SetPendingReferralResponse{Stored: true}, nil
 }
 
+// RecordBotStart — записываем нажатие /start в боте (воронка бот → Mini App).
+// Idempotent через ON CONFLICT DO NOTHING: stored=false на повторных нажатиях.
+func (a *AuthAPI) RecordBotStart(ctx context.Context, req *pb.RecordBotStartRequest) (*pb.RecordBotStartResponse, error) {
+	if req.TelegramId <= 0 {
+		return nil, status.Error(codes.InvalidArgument, "telegram_id is required")
+	}
+	stored, err := a.authService.RecordBotStart(ctx, req.TelegramId, req.Username, req.FirstName, req.StartParam)
+	if err != nil {
+		a.logger.Error("Failed to record bot start",
+			zap.Int64("telegram_id", req.TelegramId),
+			zap.Error(err),
+		)
+		return nil, status.Error(codes.Internal, "failed to record bot start")
+	}
+	if stored {
+		a.logger.Info("bot /start recorded",
+			zap.Int64("telegram_id", req.TelegramId),
+			zap.String("username", req.Username),
+			zap.String("start_param", req.StartParam),
+		)
+	}
+	return &pb.RecordBotStartResponse{Stored: stored}, nil
+}
+
 func (a *AuthAPI) VerifyToken(ctx context.Context, req *pb.VerifyTokenRequest) (*pb.VerifyTokenResponse, error) {
 	if req.Token == "" {
 		return nil, status.Error(codes.InvalidArgument, "token is required")

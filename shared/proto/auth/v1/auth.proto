@@ -30,6 +30,12 @@ service AuthService {
   // юзера в Mini App). Вызывается ботом при /start ref_<token>.
   // Upsert: если запись уже есть — перезаписываем (последний clicker побеждает).
   rpc SetPendingReferral(SetPendingReferralRequest) returns (SetPendingReferralResponse);
+
+  // Фиксирует факт нажатия /start в боте (для воронки бот → Mini App).
+  // ON CONFLICT DO NOTHING — повторные /start не перезаписывают started_at.
+  // opened_app_at проставится позже в ValidateTelegramUser при первом
+  // открытии Mini App тем же telegram_id.
+  rpc RecordBotStart(RecordBotStartRequest) returns (RecordBotStartResponse);
 }
 
 message ValidateTelegramUserRequest {
@@ -101,6 +107,17 @@ message SetPendingReferralRequest {
 
 message SetPendingReferralResponse {
   bool stored = 1; // true если успешно сохранили
+}
+
+message RecordBotStartRequest {
+  int64  telegram_id = 1;
+  string username    = 2;
+  string first_name  = 3;
+  string start_param = 4; // raw param (например "ref_<token>" или пусто)
+}
+
+message RecordBotStartResponse {
+  bool stored = 1; // true если запись была вставлена (первое нажатие /start)
 }
 
 message User {

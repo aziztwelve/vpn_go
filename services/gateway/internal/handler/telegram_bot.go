@@ -116,7 +116,7 @@ func (h *TelegramBotHandler) handleCommand(ctx context.Context, msg *Message) {
 
 	switch cmd {
 	case "/start", "/start@maydavpnbot":
-		h.handleStart(ctx, msg.Chat.ID, msg.From.ID, param)
+		h.handleStart(ctx, msg.Chat.ID, msg.From.ID, param, msg.From)
 	case "/bonus", "/bonus@maydavpnbot":
 		h.sendBonusMessage(ctx, msg.Chat.ID)
 	}
@@ -125,7 +125,23 @@ func (h *TelegramBotHandler) handleCommand(ctx context.Context, msg *Message) {
 // handleStart обрабатывает /start [param]. Если param == "ref_<token>" —
 // сохраняем атрибуцию через auth-service, чтобы при первом ValidateTelegramUser
 // (когда юзер откроет Mini App) рефералка зарегистрировалась.
-func (h *TelegramBotHandler) handleStart(ctx context.Context, chatID, telegramUserID int64, startParam string) {
+//
+// Также фиксируем сам факт нажатия /start в bot_starts (воронка бот → Mini App).
+// Telegram update не содержит last_name, поэтому передаём только username/first_name.
+func (h *TelegramBotHandler) handleStart(ctx context.Context, chatID, telegramUserID int64, startParam string, from *User) {
+	username, firstName := "", ""
+	if from != nil {
+		username = from.Username
+		firstName = from.FirstName
+	}
+
+	// Воронка: фиксируем нажатие /start. Best-effort, ошибка не блокирует UX.
+	if _, err := h.authClient.RecordBotStart(ctx, telegramUserID, username, firstName, startParam); err != nil {
+		h.logger.Warn("Failed to record bot start",
+			zap.Int64("telegram_id", telegramUserID),
+			zap.Error(err))
+	}
+
 	if strings.HasPrefix(startParam, refStartParamPrefix) {
 		token := strings.TrimPrefix(startParam, refStartParamPrefix)
 		if token != "" {

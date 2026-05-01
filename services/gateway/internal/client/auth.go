@@ -72,3 +72,18 @@ func (c *AuthClient) SetPendingReferral(ctx context.Context, telegramID int64, r
 	})
 	return err
 }
+
+// RecordBotStart — фиксирует первое нажатие /start (для воронки бот → Mini App).
+// Best-effort: вызывается из webhook'а бота, ошибка не блокирует ответ юзеру.
+func (c *AuthClient) RecordBotStart(ctx context.Context, telegramID int64, username, firstName, startParam string) (bool, error) {
+	resp, err := c.client.RecordBotStart(ctx, &pb.RecordBotStartRequest{
+		TelegramId: telegramID,
+		Username:   username,
+		FirstName:  firstName,
+		StartParam: startParam,
+	})
+	if err != nil {
+		return false, err
+	}
+	return resp.Stored, nil
+}

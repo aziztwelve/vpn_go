@@ -222,3 +222,45 @@ func (r *UserRepository) PopPendingReferral(ctx context.Context, telegramID int6
 	}
 	return refToken, true, nil
 }
+
+// InsertBotStart фиксирует первое нажатие /start (для воронки бот → Mini App).
+// ON CONFLICT DO NOTHING — повторные /start от того же telegram_id не сдвигают
+// started_at. Возвращает stored=true только если запись действительно вставилась
+// (первое нажатие).
+func (r *UserRepository) InsertBotStart(ctx context.Context, telegramID int64, username, firstName, startParam string) (bool, error) {
+	const q = `
+		INSERT INTO bot_starts (telegram_id, username, first_name, start_param)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (telegram_id) DO NOTHING
+		RETURNING telegram_id
+	`
+	var inserted int64
+	err := r.db.QueryRow(ctx, q, telegramID, username, firstName, startParam).Scan(&inserted)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil // дубликат — это норма
+		}
+		return false, fmt.Errorf("insert bot_start: %w", err)
+	}
+	return true, nil
+}
+
+// MarkBotStartAppOpened помечает что юзер открыл Mini App. Если записи /start
+// не было (юзер открыл Mini App напрямую без захода в бота) — создаём её
+// сразу с opened_app_at=NOW(), started_at тоже NOW(): такие "прямые" открытия
+// тоже учитываем в воронке как 100%-конверсию.
+//
+// Идемпотентно: если opened_app_at уже стоит — не перезаписываем.
+func (r *UserRepository) MarkBotStartAppOpened(ctx context.Context, telegramID int64, username, firstName string) error {
+	const q = `
+		INSERT INTO bot_starts (telegram_id, username, first_name, opened_app_at)
+		VALUES ($1, $2, $3, NOW())
+		ON CONFLICT (telegram_id) DO UPDATE
+		SET opened_app_at = COALESCE(bot_starts.opened_app_at, NOW())
+	`
+	_, err := r.db.Exec(ctx, q, telegramID, username, firstName)
+	if err != nil {
+		return fmt.Errorf("mark bot_start app opened: %w", err)
+	}
+	return nil
+}

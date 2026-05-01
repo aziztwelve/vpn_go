@@ -215,6 +215,15 @@ func (s *AuthService) ValidateTelegramUser(ctx context.Context, initData, refTok
 	// Обновляем last_active_at
 	_ = s.userRepo.UpdateLastActive(ctx, user.ID)
 
+	// Закрываем воронку bot_starts: помечаем opened_app_at если ещё не стоит.
+	// Best-effort — ошибка не блокирует auth (трекинг важнее не сломать UX).
+	if err := s.userRepo.MarkBotStartAppOpened(ctx, telegramID, username, firstName); err != nil {
+		s.logger.Warn("MarkBotStartAppOpened failed (non-blocking)",
+			zap.Int64("telegram_id", telegramID),
+			zap.Error(err),
+		)
+	}
+
 	// Генерируем JWT токен
 	token, err := s.GenerateJWT(user.ID, user.Role)
 	if err != nil {
@@ -386,4 +395,14 @@ func (s *AuthService) SetPendingReferral(ctx context.Context, telegramID int64, 
 		return fmt.Errorf("ref_token is required")
 	}
 	return s.userRepo.UpsertPendingReferral(ctx, telegramID, refToken)
+}
+
+// RecordBotStart фиксирует факт нажатия /start в боте (воронка бот → Mini App).
+// Возвращает stored=true только при первом нажатии (повторные /start от того
+// же telegram_id игнорируются — started_at не сдвигается).
+func (s *AuthService) RecordBotStart(ctx context.Context, telegramID int64, username, firstName, startParam string) (bool, error) {
+	if telegramID <= 0 {
+		return false, fmt.Errorf("invalid telegram_id")
+	}
+	return s.userRepo.InsertBotStart(ctx, telegramID, username, firstName, startParam)
 }
