@@ -148,14 +148,14 @@ func (h *SubscriptionConfigHandler) SubscriptionConfig(w http.ResponseWriter, r 
 	// при auto-update подписки сам начнёт получать обновлённый JSON-конфиг.
 	switch r.URL.Query().Get("format") {
 	case "json":
-		writeJSONFormat(w, cfg)
+		writeJSONFormat(w, cfg, h.defaultCountry)
 		return
 	case "base64":
 		writeBase64Format(w, cfg, h.defaultCountry)
 		return
 	}
 	if strings.Contains(userAgent, "Happ/") {
-		writeJSONFormat(w, cfg)
+		writeJSONFormat(w, cfg, h.defaultCountry)
 		return
 	}
 	writeBase64Format(w, cfg, h.defaultCountry)
@@ -247,41 +247,51 @@ func serverRemark(srv *pb.Server) string {
 	return fmt.Sprintf("%s %s", flagEmoji(srv.GetCountryCode()), srv.GetName())
 }
 
-// writeJSONFormat — массив полных Xray-конфигов: один «⚡ Обычный VPN» на
-// сервер + 🌐 АВТО ВЫБОР в конце (если серверов ≥2).
+// writeJSONFormat — массив Xray-конфигов в порядке (зеркалит base64-список):
 //
-// Раньше эмитились 3 профиля (⚡/🚀/🎬) на каждый сервер — это сильно
-// раздувало список в HAPP (N серверов = 3N+1 элементов). Сейчас оставляем
-// один универсальный режим (`profileFull` = весь трафик через VPN) — он
-// безопасный дефолт; юзер при желании выбирает конкретную страну. Bypass и
-// YouTube-режимы доступны через base64-формат (для не-HAPP клиентов) или
-// будут возвращены как отдельные deeplink'и/настройки в Mini App.
+//   1. 🚀 Обход блокировок · {flag} {default-country}    ← split-tunnel
+//   2. 🎬 YouTube без рекламы · {flag} {default-country} ← YT + AdGuard DNS
+//   3. {flag} {server.name}     ← profileFull на каждый сервер,
+//   ...                            remarks без profile-префикса
+//   N+2. 🌐 АВТО ВЫБОР           ← если серверов ≥2
 //
-// При наличии ≥2 активных серверов в КОНЕЦ списка добавляется ещё одна
-// запись «🌐 АВТО ВЫБОР» — конфиг с burstObservatory + leastLoad balancer,
-// который сам выбирает лучший по RTT VPS из всех доступных. См.
-// buildAutoXrayConfig в subscription_auto.go.
+// «⚡ Обычный VPN» как отдельная запись НЕ эмитится — она равна одному из
+// per-server-конфигов с remarks `{flag} {country}` (тот же outbound,
+// тот же routing.profileFull). Дублировать незачем.
 //
 // Формат массива JSON-конфигов — HAPP-specific расширение subscription:
 // клиент сам разбирает, добавляет каждый объект как сервер.
-func writeJSONFormat(w http.ResponseWriter, cfg *pb.GetSubscriptionConfigResponse) {
+func writeJSONFormat(w http.ResponseWriter, cfg *pb.GetSubscriptionConfigResponse, defaultCountry string) {
 	servers := cfg.GetServers()
 	user := cfg.GetVpnUser()
 
-	estimate := len(servers)
+	// 2 mode-конфига + N per-server + 1 auto.
+	estimate := 2 + len(servers)
 	if len(servers) >= 2 {
 		estimate++
 	}
 	configs := make([]map[string]interface{}, 0, estimate)
 
-	// Один профиль (profileFull = ⚡ Обычный VPN) на каждый сервер.
-	for _, srv := range servers {
-		configs = append(configs, buildXrayConfig(user, srv, profileFull))
+	// 1) Bypass и YouTube — на дефолтный сервер.
+	if len(servers) > 0 {
+		best := pickDefaultServer(servers, defaultCountry)
+		for _, p := range []routingProfile{profileBypass, profileYoutube} {
+			configs = append(configs, buildXrayConfig(user, best, p))
+		}
 	}
 
-	// Auto-balancer добавляем В КОНЕЦ списка чтобы не менять "default selection"
-	// у уже подключившихся клиентов (HAPP по умолчанию выбирает первую запись).
-	// Эмитим только когда серверов ≥2, иначе balancer бессмыслен.
+	// 2) Per-server: один profileFull-конфиг на каждый сервер с remarks
+	//    "{flag} {server.name}" (без profile-префикса). Эта же запись
+	//    выполняет роль «⚡ Обычный VPN на эту страну».
+	for _, srv := range servers {
+		c := buildXrayConfig(user, srv, profileFull)
+		c["remarks"] = serverRemark(srv)
+		configs = append(configs, c)
+	}
+
+	// 3) Auto-balancer — В КОНЦЕ списка чтобы не менять "default selection"
+	//    у уже подключившихся клиентов (HAPP по умолчанию выбирает первую
+	//    запись). Эмитим только когда серверов ≥2.
 	if len(servers) >= 2 {
 		configs = append(configs, buildAutoXrayConfig(user, servers))
 	}
