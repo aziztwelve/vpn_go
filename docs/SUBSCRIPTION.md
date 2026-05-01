@@ -164,6 +164,76 @@ Subscription предоставляет **3 конфигурации** с оди
 - YouTube, заблокированные соцсети → proxy
 - Всё остальное → direct
 
+### 4. 🌐 АВТО ВЫБОР (multi-server, JSON-формат)
+
+**Эмитится только в JSON-формате (`?format=json`) и только при ≥2 активных серверах.**
+В base64-выдаче (default) НЕ появляется — формат VLESS-URI не поддерживает balancer.
+
+Один дополнительный конфиг в **конце** массива, который сам выбирает лучший VPS по
+реальному RTT (HTTP-ping `gstatic.com/generate_204` через сам outbound, interval 1m)
+и автопереключается при падении ноды (≤1 минуты).
+
+**Зачем добавили в конец:** HAPP по умолчанию выбирает первый элемент массива как
+активный сервер. Помещая АВТО ВЫБОР последним, мы не ломаем default selection у
+уже подключённых клиентов — те, кто хочет, переключатся вручную.
+
+**Routing-стратегия:**
+- Локальные IP/RU GeoIP → direct (без VPN, как в Bypass-профиле)
+- Apple/iCloud → direct (избегаем проблем с push-нотификациями)
+- Всё остальное → balancer
+- Если все ноды dead → blackhole (НЕ direct — для VPN-сервиса утечка реального
+  IP при fallback'е недопустима)
+
+**Структура (упрощённо):**
+```json
+{
+  "remarks": "🌐 АВТО ВЫБОР",
+  "outbounds": [
+    {"tag": "proxy-1", "protocol": "vless", "settings": {...}, "streamSettings": {...}},
+    {"tag": "proxy-2", "protocol": "vless", "settings": {...}, "streamSettings": {...}},
+    {"tag": "proxy-N", "protocol": "vless", "settings": {...}, "streamSettings": {...}},
+    {"tag": "direct", "protocol": "freedom"},
+    {"tag": "block",  "protocol": "blackhole"}
+  ],
+  "routing": {
+    "balancers": [{
+      "tag": "Auto_Balancer",
+      "selector": ["proxy"],
+      "strategy": {"type": "leastLoad", "settings": {"expected": 2}},
+      "fallbackTag": "block"
+    }],
+    "rules": [
+      {"type":"field","ip":["geoip:private","geoip:ru"],"outboundTag":"direct"},
+      {"type":"field","domain":["geosite:apple"],"outboundTag":"direct"},
+      {"type":"field","network":"tcp,udp","balancerTag":"Auto_Balancer"}
+    ]
+  },
+  "burstObservatory": {
+    "subjectSelector": ["proxy"],
+    "pingConfig": {
+      "destination": "http://www.gstatic.com/generate_204",
+      "interval": "1m",
+      "timeout": "3s",
+      "sampling": 1
+    }
+  }
+}
+```
+
+**Ключевые моменты:**
+- `subjectSelector: ["proxy"]` — prefix-match. Все outbound'ы с тегом
+  `proxy-N` автоматически становятся кандидатами для observatory + balancer.
+- `expected: 2` — leastLoad требует минимум 2 живых outbound'а, иначе
+  идём в `fallbackTag: "block"`. С 1 кандидатом balancer бессмыслен.
+- `burstObservatory` — top-level в конфиге (не внутри routing), это
+  standalone-фича Xray (`xray-core/app/observatory/burst`).
+- Health-check overhead: `~50 байт × N серверов / минута` (gstatic 204 ответ).
+
+**Реализация:** [`services/gateway/internal/handler/subscription_auto.go`](../services/gateway/internal/handler/subscription_auto.go).
+Тесты: `subscription_auto_test.go`.
+
+См. также раздел [«Тестирование АВТО ВЫБОР»](#тестирование-авто-выбор-вручную) ниже.
+
 ## Технические детали
 
 ### VLESS параметры
@@ -241,6 +311,126 @@ curl https://cdn.osmonai.com/api/v1/subscription/test?format=json | jq
 2. Меню → Подписки → "+"
 3. Вставить URL: `https://cdn.osmonai.com/api/v1/subscription/test`
 4. Обновить подписку
+
+## Тестирование «АВТО ВЫБОР» вручную
+
+Что мы хотим проверить:
+1. Какой сервер выбрал balancer (live RTT-замеры observatory).
+2. Какой реальный exit IP у трафика (= какая VPS на самом деле обрабатывает запрос).
+3. Распределение запросов между топ-кандидатами на длинной серии.
+
+Тестировать удобнее **с отдельной машины, а не с самой VPN-ноды** — RTT до
+"себя же" будет ~0, и balancer всегда будет выбирать локальный сервер. Подойдёт
+любой сервер/ноут с docker.
+
+### Шаг 1. Получить и пропатчить «АВТО ВЫБОР» из subscription
+
+```bash
+SUB_URL='https://cdn.osmonai.com/api/v1/subscription/<TOKEN>?format=json'
+
+curl -sS "$SUB_URL" \
+  | jq '
+      # выдираем именно АВТО ВЫБОР
+      map(select(.remarks | contains("АВТО"))) | .[0]
+      # info-логи (видно taking detour [proxy-N] и observatory)
+      | .log.loglevel = "info"
+      # gRPC api для xray api bi
+      | .api = {tag:"api", services:["RoutingService","StatsService"]}
+      | .inbounds += [{
+          tag:"api", listen:"127.0.0.1", port:10086,
+          protocol:"dokodemo-door", settings:{address:"127.0.0.1"}
+        }]
+      | .routing.rules = ([{type:"field", inboundTag:["api"], outboundTag:"api"}] + (.routing.rules // []))
+    ' > /tmp/auto.json
+
+# Sanity-check: должны быть proxy-1..proxy-N + balancer
+jq '{
+  outbounds: [.outbounds[] | {tag, host: .settings.vnext[0].address}],
+  balancer: .routing.balancers[0].tag,
+  observatory: .burstObservatory.pingConfig.interval
+}' /tmp/auto.json
+```
+
+### Шаг 2. Запустить xray в docker
+
+```bash
+docker run -d --name xray-test --network host \
+  -v /tmp/auto.json:/etc/xray/config.json:ro \
+  ghcr.io/xtls/xray-core:latest run -c /etc/xray/config.json
+
+# Дать observatory сделать минимум один полный цикл (interval=1m)
+sleep 65
+
+docker ps --filter name=xray-test
+docker logs xray-test 2>&1 | tail -20
+```
+
+### Шаг 3. Посмотреть, какой сервер выбран
+
+#### Через `xray api bi` (состояние balancer'а + health)
+
+```bash
+docker exec xray-test xray api bi --server=127.0.0.1:10086 Auto_Balancer
+# Вывод:
+#   - Selecting Override:
+#     1
+#   - Selects:
+#     1   proxy-N    ← победитель leastLoad
+#     2   proxy-M
+```
+
+> **Note:** В Xray 26.x команды `xray api obs` НЕТ
+> (`unknown command`). Состояние observatory смотрится через `bi` (selects
+> сортируются по RTT) или через info-логи. `ObservatoryService` в
+> `api.services` тоже не нужен — достаточно `RoutingService`.
+
+#### Через exit IP
+
+```bash
+# Один запрос
+EXIT=$(curl -sS --socks5-hostname 127.0.0.1:10808 https://api.ipify.org)
+echo "exit IP = $EXIT"
+
+# Сматчить с серверами в конфиге
+jq -r '.outbounds[] | select(.tag|startswith("proxy")) | "\(.tag)\t\(.settings.vnext[0].address)"' /tmp/auto.json | column -t
+
+# Распределение по 30 запросам
+for i in $(seq 1 30); do
+  curl -sS --socks5-hostname 127.0.0.1:10808 https://api.ipify.org
+  echo
+done | sort | uniq -c | sort -rn
+```
+
+#### Через info-логи
+
+```bash
+docker logs -f xray-test 2>&1 | grep -E 'observatory|taking platform initialized detour|dialing TCP'
+# Каждое соединение через balancer логируется как:
+#   app/dispatcher: taking platform initialized detour [proxy-N] for [tcp:...]
+#   transport/internet/tcp: dialing TCP to tcp:<host>:8443
+```
+
+### Шаг 4. Cleanup
+
+```bash
+docker rm -f xray-test
+rm /tmp/auto.json
+```
+
+### Гитчи
+
+- **`--socks5-hostname`** (не `--socks5`) — иначе DNS резолвится локально и
+  попадает не в balancer-rule, а в RU/private direct-rule.
+- **`--network host`** в docker — `inbounds.listen: 127.0.0.1` иначе будет
+  слушать loopback внутри контейнера, и host-side curl не достучится.
+- **`network: "tcp,udp"`** в balancer-rule **обязателен**. Без него Xray
+  валится `app/router: this rule has no effective fields`.
+- **Минута ожидания при первом старте** — `burstObservatory.interval = 1m`.
+  До первого тика `selects` пустые, balancer просто берёт первый outbound по
+  списку. Xray делает дополнительный one-time health-check сразу при старте,
+  так что первые замеры приходят за ~1-2 секунды, но полный цикл — 60s.
+- **Тестировать с самой VPN-ноды бессмысленно** — RTT до loopback = ~15ms,
+  до удалённой ноды = 30-150ms, balancer всегда выберет локальную.
 
 ## Troubleshooting
 
