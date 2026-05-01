@@ -38,7 +38,7 @@ type ServicesConfig struct {
 // ReferralConfig — настройки реферальной программы.
 type ReferralConfig struct {
 	// BotUsername используется для построения deep-link'а:
-	//   https://t.me/<BotUsername>?startapp=ref_<token>
+	//   https://t.me/<BotUsername>?start=ref_<token>
 	BotUsername string
 	// FreshnessSeconds — максимальный возраст приглашённого юзера для
 	// валидной регистрации реферала (anti-abuse). По дефолту 60s — приглашённый

@@ -25,6 +25,11 @@ service AuthService {
   
   // Проверка JWT токена
   rpc VerifyToken(VerifyTokenRequest) returns (VerifyTokenResponse);
+
+  // Сохраняет pending реферальный токен по telegram_id (до регистрации
+  // юзера в Mini App). Вызывается ботом при /start ref_<token>.
+  // Upsert: если запись уже есть — перезаписываем (последний clicker побеждает).
+  rpc SetPendingReferral(SetPendingReferralRequest) returns (SetPendingReferralResponse);
 }
 
 message ValidateTelegramUserRequest {
@@ -87,6 +92,15 @@ message VerifyTokenResponse {
   int64 user_id = 1;
   string role = 2;
   bool is_valid = 3;
+}
+
+message SetPendingReferralRequest {
+  int64 telegram_id = 1;
+  string ref_token = 2; // Чистый токен (без префикса ref_)
+}
+
+message SetPendingReferralResponse {
+  bool stored = 1; // true если успешно сохранили
 }
 
 message User {

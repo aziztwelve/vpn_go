@@ -62,3 +62,13 @@ func (c *AuthClient) SelfUpdateRole(ctx context.Context, userID int64, role stri
 		Role:   role,
 	})
 }
+
+// SetPendingReferral — сохранить ref_token по telegram_id ДО регистрации
+// (вызывается из webhook'а бота при /start ref_<token>).
+func (c *AuthClient) SetPendingReferral(ctx context.Context, telegramID int64, refToken string) error {
+	_, err := c.client.SetPendingReferral(ctx, &pb.SetPendingReferralRequest{
+		TelegramId: telegramID,
+		RefToken:   refToken,
+	})
+	return err
+}

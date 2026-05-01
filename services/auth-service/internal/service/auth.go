@@ -221,11 +221,37 @@ func (s *AuthService) ValidateTelegramUser(ctx context.Context, initData, refTok
 		return nil, fmt.Errorf("failed to generate JWT: %w", err)
 	}
 
+	// Резолв реферального токена:
+	//  1. Frontend supplied (?startapp=ref_X) — приоритет.
+	//  2. Pending от бота (/start ref_X сохранил в pending_referrals).
+	//
+	// Pop делаем для ВСЕХ юзеров (не только новых), чтобы не оставлять
+	// мусор: если существующий юзер кликнул чужую реф-ссылку, бонус ему
+	// всё равно не положен (см. условие isNewUser ниже).
+	resolvedRefToken := refToken
+	if isNewUser && resolvedRefToken == "" {
+		if pending, found, err := s.userRepo.PopPendingReferral(ctx, telegramID); err != nil {
+			s.logger.Warn("PopPendingReferral failed (non-blocking)",
+				zap.Int64("telegram_id", telegramID),
+				zap.Error(err),
+			)
+		} else if found {
+			resolvedRefToken = pending
+			s.logger.Info("resolved pending ref_token from bot /start",
+				zap.Int64("telegram_id", telegramID),
+				zap.String("ref_token", pending),
+			)
+		}
+	} else if !isNewUser {
+		// Cleanup: существующий юзер — pending больше не нужен.
+		_, _, _ = s.userRepo.PopPendingReferral(ctx, telegramID)
+	}
+
 	// Реферальная регистрация — только для новых юзеров и только если есть
 	// токен и сконфигурирован клиент. Ошибки игнорируем (best-effort).
 	referralRegistered := false
-	if isNewUser && refToken != "" && s.referral != nil {
-		referralRegistered = s.tryRegisterReferral(ctx, refToken, user.ID)
+	if isNewUser && resolvedRefToken != "" && s.referral != nil {
+		referralRegistered = s.tryRegisterReferral(ctx, resolvedRefToken, user.ID)
 	}
 
 	return &ValidateResult{
@@ -347,4 +373,17 @@ func (s *AuthService) SelfUpdateRole(ctx context.Context, userID int64, role str
 // BanUser банит/разбанивает пользователя
 func (s *AuthService) BanUser(ctx context.Context, userID int64, isBanned bool) (*model.User, error) {
 	return s.userRepo.BanUser(ctx, userID, isBanned)
+}
+
+// SetPendingReferral сохраняет связь telegram_id → ref_token до того, как
+// юзер пройдёт ValidateTelegramUser. Вызывается из Gateway-бота при
+// /start ref_<token>. Upsert: повторный клик другой ссылки перезаписывает.
+func (s *AuthService) SetPendingReferral(ctx context.Context, telegramID int64, refToken string) error {
+	if telegramID <= 0 {
+		return fmt.Errorf("invalid telegram_id")
+	}
+	if refToken == "" {
+		return fmt.Errorf("ref_token is required")
+	}
+	return s.userRepo.UpsertPendingReferral(ctx, telegramID, refToken)
 }

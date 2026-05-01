@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/vpn/gateway/internal/client"
@@ -12,6 +13,11 @@ import (
 	pb "github.com/vpn/shared/pkg/proto/subscription/v1"
 	"go.uber.org/zap"
 )
+
+// refStartParamPrefix — префикс start-параметра для реферального deep-link.
+// Формат ссылки: https://t.me/<bot>?start=ref_<token>
+// Telegram передаёт боту "ref_<token>" в команде "/start ref_<token>".
+const refStartParamPrefix = "ref_"
 
 // TelegramBotHandler обрабатывает команды и callback'и от Telegram бота
 type TelegramBotHandler struct {
@@ -93,14 +99,51 @@ func (h *TelegramBotHandler) HandleBotWebhook(w http.ResponseWriter, r *http.Req
 	w.WriteHeader(http.StatusOK)
 }
 
-// handleCommand обрабатывает текстовые команды
+// handleCommand обрабатывает текстовые команды.
+//
+// /start поддерживает опциональный параметр (deep-link):
+//
+//	/start                — обычный приветственный экран
+//	/start ref_<token>    — реферальная ссылка, сохраняем pending атрибуцию
+//	/start <other>        — игнорируем параметр, шлём приветствие
 func (h *TelegramBotHandler) handleCommand(ctx context.Context, msg *Message) {
-	switch msg.Text {
+	text := strings.TrimSpace(msg.Text)
+
+	// Разбираем "/start" или "/start@maydavpnbot" с опциональным параметром.
+	cmd, param, _ := strings.Cut(text, " ")
+	cmd = strings.TrimSpace(cmd)
+	param = strings.TrimSpace(param)
+
+	switch cmd {
 	case "/start", "/start@maydavpnbot":
-		h.sendStartMessage(ctx, msg.Chat.ID, msg.From.ID)
+		h.handleStart(ctx, msg.Chat.ID, msg.From.ID, param)
 	case "/bonus", "/bonus@maydavpnbot":
 		h.sendBonusMessage(ctx, msg.Chat.ID)
 	}
+}
+
+// handleStart обрабатывает /start [param]. Если param == "ref_<token>" —
+// сохраняем атрибуцию через auth-service, чтобы при первом ValidateTelegramUser
+// (когда юзер откроет Mini App) рефералка зарегистрировалась.
+func (h *TelegramBotHandler) handleStart(ctx context.Context, chatID, telegramUserID int64, startParam string) {
+	if strings.HasPrefix(startParam, refStartParamPrefix) {
+		token := strings.TrimPrefix(startParam, refStartParamPrefix)
+		if token != "" {
+			if err := h.authClient.SetPendingReferral(ctx, telegramUserID, token); err != nil {
+				// Best-effort: ошибка не блокирует UX — юзер всё равно получит
+				// приветствие и сможет открыть Mini App. Атрибуция просто не сработает.
+				h.logger.Warn("Failed to store pending referral",
+					zap.Int64("telegram_id", telegramUserID),
+					zap.String("ref_token", token),
+					zap.Error(err))
+			} else {
+				h.logger.Info("Pending referral stored from /start",
+					zap.Int64("telegram_id", telegramUserID),
+					zap.String("ref_token", token))
+			}
+		}
+	}
+	h.sendStartMessage(ctx, chatID, telegramUserID)
 }
 
 // sendStartMessage отправляет приветственное сообщение с кнопкой открытия Mini App
@@ -115,7 +158,9 @@ func (h *TelegramBotHandler) sendStartMessage(ctx context.Context, chatID int64,
 • Надежная защита данных
 • Простое подключение
 
-📢 <b>Подпишитесь на наш канал</b> @maydavpn — там новости, обновления и полезные советы!
+📢 <b>Подпишитесь на наш канал</b> @maydavpn — там инструкция по подключению, новости и полезные советы!
+
+💬 По всем вопросам пишите в техподдержку — @maydavpn_support
 
 👉 Нажмите кнопку ниже, чтобы начать!`
 

@@ -128,6 +128,32 @@ func (a *AuthAPI) BanUser(ctx context.Context, req *pb.BanUserRequest) (*pb.BanU
 	}, nil
 }
 
+// SetPendingReferral — bot-side вход для /start ref_<token>. Вызывает
+// gateway, когда пользователь кликает реф-ссылку и попадает в чат
+// бота ДО регистрации в Mini App. ValidateTelegramUser потом "съест"
+// эту запись на первой регистрации.
+func (a *AuthAPI) SetPendingReferral(ctx context.Context, req *pb.SetPendingReferralRequest) (*pb.SetPendingReferralResponse, error) {
+	if req.TelegramId <= 0 {
+		return nil, status.Error(codes.InvalidArgument, "telegram_id is required")
+	}
+	if req.RefToken == "" {
+		return nil, status.Error(codes.InvalidArgument, "ref_token is required")
+	}
+	if err := a.authService.SetPendingReferral(ctx, req.TelegramId, req.RefToken); err != nil {
+		a.logger.Error("Failed to set pending referral",
+			zap.Int64("telegram_id", req.TelegramId),
+			zap.String("ref_token", req.RefToken),
+			zap.Error(err),
+		)
+		return nil, status.Error(codes.Internal, "failed to store pending referral")
+	}
+	a.logger.Info("pending referral stored",
+		zap.Int64("telegram_id", req.TelegramId),
+		zap.String("ref_token", req.RefToken),
+	)
+	return &pb.SetPendingReferralResponse{Stored: true}, nil
+}
+
 func (a *AuthAPI) VerifyToken(ctx context.Context, req *pb.VerifyTokenRequest) (*pb.VerifyTokenResponse, error) {
 	if req.Token == "" {
 		return nil, status.Error(codes.InvalidArgument, "token is required")

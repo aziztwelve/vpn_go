@@ -2,8 +2,10 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/vpn/auth-service/internal/model"
 )
@@ -187,4 +189,36 @@ func (r *UserRepository) UpdateLastActive(ctx context.Context, userID int64) err
 	query := `UPDATE users SET last_active_at = NOW() WHERE id = $1`
 	_, err := r.db.Exec(ctx, query, userID)
 	return err
+}
+
+// UpsertPendingReferral сохраняет/перезаписывает pending реферальный токен
+// для telegram_id. Один telegram_id = один токен (последний clicker побеждает).
+func (r *UserRepository) UpsertPendingReferral(ctx context.Context, telegramID int64, refToken string) error {
+	query := `
+		INSERT INTO pending_referrals (telegram_id, ref_token)
+		VALUES ($1, $2)
+		ON CONFLICT (telegram_id) DO UPDATE
+		SET ref_token = EXCLUDED.ref_token, created_at = NOW()
+	`
+	_, err := r.db.Exec(ctx, query, telegramID, refToken)
+	if err != nil {
+		return fmt.Errorf("upsert pending referral: %w", err)
+	}
+	return nil
+}
+
+// PopPendingReferral возвращает токен по telegram_id и удаляет запись (атомарно).
+// Если записи нет — возвращает ("", false, nil), без ошибки.
+func (r *UserRepository) PopPendingReferral(ctx context.Context, telegramID int64) (string, bool, error) {
+	query := `DELETE FROM pending_referrals WHERE telegram_id = $1 RETURNING ref_token`
+	var refToken string
+	err := r.db.QueryRow(ctx, query, telegramID).Scan(&refToken)
+	if err != nil {
+		// DELETE ... RETURNING + .Scan возвращает pgx.ErrNoRows если строк не было.
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("pop pending referral: %w", err)
+	}
+	return refToken, true, nil
 }

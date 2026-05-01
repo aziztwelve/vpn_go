@@ -74,8 +74,24 @@ func (s *Referral) GetOrCreateLink(ctx context.Context, userID int64) (*LinkInfo
 	}, nil
 }
 
+// buildDeepLink — реферальная ссылка через классический bot deep-link
+// (https://core.telegram.org/api/links#bot-links).
+//
+//	https://t.me/<BotUsername>?start=ref_<token>
+//
+// Telegram при клике откроет чат с ботом и пошлёт ему "/start ref_<token>".
+// Webhook-хендлер бота (gateway/handler/telegram_bot.go::handleStart)
+// извлекает токен и через auth-service сохраняет pending-атрибуцию по
+// telegram_id. На первой регистрации юзера в Mini App
+// (auth-service.ValidateTelegramUser) этот токен подхватывается и
+// инициирует RegisterReferral в референц-сервисе.
+//
+// Почему НЕ ?startapp=ref_<token>: формат `?startapp=` требует, чтобы у
+// бота в @BotFather был сконфигурирован "main mini app" — иначе Telegram
+// просто открывает чат и не запускает Mini App автоматически. Классический
+// `?start=` работает универсально (Mobile/Desktop/Web).
 func (s *Referral) buildDeepLink(token string) string {
-	return fmt.Sprintf("https://t.me/%s?startapp=ref_%s", s.cfg.BotUsername, token)
+	return fmt.Sprintf("https://t.me/%s?start=ref_%s", s.cfg.BotUsername, token)
 }
 
 // ─── RegisterClick ──────────────────────────────────────────────────
