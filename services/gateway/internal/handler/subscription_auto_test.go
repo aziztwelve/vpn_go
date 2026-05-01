@@ -175,8 +175,8 @@ func TestBuildBurstObservatory_Defaults(t *testing.T) {
 }
 
 // TestWriteJSONFormat_AddsAutoWhenMultipleServers — на 2+ серверах в JSON-ответе
-// список: 2 mode-конфига (Bypass + YouTube на default) + N per-server +
-// 1 АВТО ВЫБОР В КОНЦЕ. Для 2 серверов: 2+2+1 = 5.
+// список: 3 mode-конфига (Full + Bypass + YouTube на default) + N per-server +
+// 1 АВТО ВЫБОР В КОНЦЕ. Для 2 серверов: 3+2+1 = 6.
 func TestWriteJSONFormat_AddsAutoWhenMultipleServers(t *testing.T) {
 	cfg := &pb.GetSubscriptionConfigResponse{
 		VpnUser: fixtureUser(),
@@ -195,23 +195,26 @@ func TestWriteJSONFormat_AddsAutoWhenMultipleServers(t *testing.T) {
 		t.Fatalf("decode body: %v", err)
 	}
 
-	// 2 modes + 2 servers + 1 auto = 5 entries.
-	want := 2 + len(cfg.Servers) + 1
+	// 3 modes + 2 servers + 1 auto = 6 entries.
+	want := len(defaultProfiles) + len(cfg.Servers) + 1
 	if len(got) != want {
 		t.Errorf("want %d configs, got %d", want, len(got))
 	}
 
-	// Первые два — Bypass и YouTube (с profile-префиксом в remarks).
-	if r0, _ := got[0]["remarks"].(string); !strings.Contains(r0, "Обход блокировок") {
-		t.Errorf("got[0] must be Bypass, got remarks=%q", r0)
+	// Первые три — режимы на дефолтном сервере (с profile-префиксом).
+	if r0, _ := got[0]["remarks"].(string); !strings.Contains(r0, "Обычный VPN") {
+		t.Errorf("got[0] must be Full, got remarks=%q", r0)
 	}
-	if r1, _ := got[1]["remarks"].(string); !strings.Contains(r1, "YouTube") {
-		t.Errorf("got[1] must be YouTube, got remarks=%q", r1)
+	if r1, _ := got[1]["remarks"].(string); !strings.Contains(r1, "Обход блокировок") {
+		t.Errorf("got[1] must be Bypass, got remarks=%q", r1)
+	}
+	if r2, _ := got[2]["remarks"].(string); !strings.Contains(r2, "YouTube") {
+		t.Errorf("got[2] must be YouTube, got remarks=%q", r2)
 	}
 
 	// Per-server entries: remarks без profile-префикса (просто "{flag} {name}").
 	// Не должны содержать "·" из profileRemark формата.
-	for i := 2; i < 2+len(cfg.Servers); i++ {
+	for i := len(defaultProfiles); i < len(defaultProfiles)+len(cfg.Servers); i++ {
 		r, _ := got[i]["remarks"].(string)
 		if strings.Contains(r, "·") {
 			t.Errorf("got[%d] per-server entry must NOT have profile prefix, got %q", i, r)
@@ -230,7 +233,7 @@ func TestWriteJSONFormat_AddsAutoWhenMultipleServers(t *testing.T) {
 }
 
 // TestWriteJSONFormat_NoAutoForSingleServer — с одним сервером auto-балансер
-// бессмыслен. Должно быть 2 mode + 1 server = 3 записи, без auto.
+// бессмыслен. Должно быть 3 mode + 1 server = 4 записи, без auto.
 func TestWriteJSONFormat_NoAutoForSingleServer(t *testing.T) {
 	cfg := &pb.GetSubscriptionConfigResponse{
 		VpnUser: fixtureUser(),
@@ -245,8 +248,9 @@ func TestWriteJSONFormat_NoAutoForSingleServer(t *testing.T) {
 		t.Fatalf("decode body: %v", err)
 	}
 
-	if len(got) != 3 {
-		t.Errorf("want 3 configs (2 modes + 1 server, no auto), got %d", len(got))
+	want := len(defaultProfiles) + len(cfg.Servers)
+	if len(got) != want {
+		t.Errorf("want %d configs (3 modes + 1 server, no auto), got %d", want, len(got))
 	}
 
 	// Ни в одной из записей не должно быть burstObservatory.

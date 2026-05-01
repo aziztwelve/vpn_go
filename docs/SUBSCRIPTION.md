@@ -135,15 +135,16 @@ vless://550e8400-e29b-41d4-a716-446655440000@178.104.217.201:8443?flow=xtls-rprx
 В **JSON-формате** (HAPP) список зеркалит base64 + автоматический balancer в конце:
 
 ```
-🚀 Обход блокировок · 🇩🇪 Germany     ← 2 спец-режима на defaultCountry
-🎬 YouTube без рекламы · 🇩🇪 Germany
+⚡ Обычный VPN · 🇩🇪 Germany       ← 3 режима на defaultCountry
+🚀 Обход блокировок · 🇩🇪 Germany    (один и тот же outbound,
+🎬 YouTube без рекламы · 🇩🇪 Germany    разные routing-стратегии)
 🇫🇮 Finland                        ← per-server: «весь трафик через эту
 🇩🇪 Germany                            страну», remarks без префикса
 🇳🇱 Netherlands-01
 🌐 АВТО ВЫБОР                     ← если серверов ≥2
 ```
 
-`⚡ Обычный VPN · {country}` отдельной записью НЕ эмитится — она равна одному из per-server-конфигов (`{flag} {country}`): тот же outbound + тот же `profileFull` routing.
+«⚡ Обычный VPN · {country}» и «{flag} {country}» — это один и тот же outbound с одним и тем же `profileFull` routing. Оставляем оба намеренно: первый — в группе «режимов» как «универсальный VPN на дефолте»; второй — в группе выбора географии. Привычный UX базы.
 
 В **base64-формате** (V2RayNG/Hiddify) — 3 «режима» на дефолтную страну + по одной ссылке на каждый сервер (АВТО ВЫБОР невозможен в base64, balancer не выражается через VLESS-URI):
 

@@ -249,15 +249,23 @@ func serverRemark(srv *pb.Server) string {
 
 // writeJSONFormat — массив Xray-конфигов в порядке (зеркалит base64-список):
 //
-//   1. 🚀 Обход блокировок · {flag} {default-country}    ← split-tunnel
-//   2. 🎬 YouTube без рекламы · {flag} {default-country} ← YT + AdGuard DNS
-//   3. {flag} {server.name}     ← profileFull на каждый сервер,
+//   1. ⚡ Обычный VPN · {flag} {default-country}         ← весь трафик
+//   2. 🚀 Обход блокировок · {flag} {default-country}    ← split-tunnel
+//   3. 🎬 YouTube без рекламы · {flag} {default-country} ← YT + AdGuard DNS
+//   4. {flag} {server.name}     ← profileFull на каждый сервер,
 //   ...                            remarks без profile-префикса
-//   N+2. 🌐 АВТО ВЫБОР           ← если серверов ≥2
+//   N+3. 🌐 АВТО ВЫБОР           ← если серверов ≥2
 //
-// «⚡ Обычный VPN» как отдельная запись НЕ эмитится — она равна одному из
-// per-server-конфигов с remarks `{flag} {country}` (тот же outbound,
-// тот же routing.profileFull). Дублировать незачем.
+// Первые три — «режимы» на defaultCountry-сервере (фиксированная страна,
+// не привязанная к load_percent — чтобы юзер не получал случайную VPS при
+// каждом обновлении подписки).
+//
+// `⚡ Обычный VPN · {country}` и `{flag} {country}` ниже выглядят как
+// дубликат (тот же outbound, тот же profileFull). Оставляем оба намеренно:
+//   - первый — в группе режимов, как «универсальный VPN на дефолте»;
+//   - второй — в группе выбора географии, как «весь трафик через эту страну».
+// Юзеру это даёт привычный UX: сначала «как роутить», потом «через какую
+// страну».
 //
 // Формат массива JSON-конфигов — HAPP-specific расширение subscription:
 // клиент сам разбирает, добавляет каждый объект как сервер.
@@ -265,17 +273,17 @@ func writeJSONFormat(w http.ResponseWriter, cfg *pb.GetSubscriptionConfigRespons
 	servers := cfg.GetServers()
 	user := cfg.GetVpnUser()
 
-	// 2 mode-конфига + N per-server + 1 auto.
-	estimate := 2 + len(servers)
+	// 3 mode-конфига + N per-server + 1 auto.
+	estimate := len(defaultProfiles) + len(servers)
 	if len(servers) >= 2 {
 		estimate++
 	}
 	configs := make([]map[string]interface{}, 0, estimate)
 
-	// 1) Bypass и YouTube — на дефолтный сервер.
+	// 1) Все 3 режима — на дефолтный сервер.
 	if len(servers) > 0 {
 		best := pickDefaultServer(servers, defaultCountry)
-		for _, p := range []routingProfile{profileBypass, profileYoutube} {
+		for _, p := range defaultProfiles {
 			configs = append(configs, buildXrayConfig(user, best, p))
 		}
 	}
