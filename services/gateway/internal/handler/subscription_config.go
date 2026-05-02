@@ -48,7 +48,24 @@ func NewSubscriptionConfigHandler(vpnClient *client.VPNClient, defaultCountry st
 }
 
 // SubscriptionConfig — точка входа HTTP.
+// URL: `GET /api/v1/subscription/{token}`.
+// Формат выбирается по UA и query (?format=json|base64), см. serve().
 func (h *SubscriptionConfigHandler) SubscriptionConfig(w http.ResponseWriter, r *http.Request) {
+	h.serve(w, r, false)
+}
+
+// SubscriptionConfigTest — идентичная ручка, но ВСЕГДА отдаёт base64
+// (VLESS-URI'ы), без UA-sniff. URL: `GET /api/v1/subscription-test/{token}`.
+// Создан для A/B-проверки клиентов, которые не едят JSON-формат (см. Happ
+// macOS — у него baseline, а JSON валится на некоторых билдах).
+func (h *SubscriptionConfigHandler) SubscriptionConfigTest(w http.ResponseWriter, r *http.Request) {
+	h.serve(w, r, true)
+}
+
+// serve — общая логика обеих ручек: валидация токена, device-touch,
+// заголовки, выбор формата. forceBase64=true → всегда base64, независимо
+// от UA и query. forceBase64=false → старая логика (UA-sniff + ?format=).
+func (h *SubscriptionConfigHandler) serve(w http.ResponseWriter, r *http.Request, forceBase64 bool) {
 	token := chi.URLParam(r, "token")
 	if token == "" {
 		writeJSONError(w, http.StatusBadRequest, "token required")
@@ -134,6 +151,14 @@ func (h *SubscriptionConfigHandler) SubscriptionConfig(w http.ResponseWriter, r 
 	w.Header().Set("Fragmentation-Interval", "10-30")
 	w.Header().Set("Ping-Type", "proxy-head")
 	w.Header().Set("Sub-Expire", "1")
+
+	// Test-endpoint (/api/v1/subscription-test/...) форсит base64 независимо
+	// от UA и query — так мы можем параллельно прогонять тот же токен через
+	// оба формата и сравнивать поведение клиентов.
+	if forceBase64 {
+		writeBase64Format(w, cfg, h.defaultCountry)
+		return
+	}
 
 	// Выбор формата:
 	//   1. Явный `?format=json` — приоритет, отдаём JSON (HAPP-extension).

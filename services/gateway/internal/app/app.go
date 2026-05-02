@@ -183,6 +183,10 @@ func (a *App) Start() error {
 		// Subscription config для VPN клиентов (Happ, V2RayNG, etc.).
 		// Ratelimit — защита от брутфорса токенов (см. subscriptionLimiter выше).
 		r.With(subscriptionLimiter.Handler).Get("/subscription/{token}", subscriptionConfigHandler.SubscriptionConfig)
+		// Тестовый endpoint — идентичный /subscription/{token}, но ВСЕГДА отдаёт
+		// base64-формат. Нужен для A/B-проверки клиентов (особенно macOS Happ,
+		// который на JSON-формате подвисает). Тот же rate-limit что и основной.
+		r.With(subscriptionLimiter.Handler).Get("/subscription-test/{token}", subscriptionConfigHandler.SubscriptionConfigTest)
 		// Telegram webhook — публичный, но защищён shared-секретом
 		// в заголовке X-Telegram-Bot-Api-Secret-Token (проверяется в handler'е).
 		r.Post("/telegram/webhook", paymentHandler.TelegramWebhook)
