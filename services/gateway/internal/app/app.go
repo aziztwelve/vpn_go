@@ -28,6 +28,7 @@ type App struct {
 	vpnClient          *client.VPNClient
 	paymentClient      *client.PaymentClient
 	referralClient     *client.ReferralClient // nil если REFERRAL_SERVICE_ADDR не задан
+	campaignClient     *client.CampaignClient // nil если REFERRAL_SERVICE_ADDR не задан (campaign живёт в том же бинарнике)
 	closer             *closer.Closer
 }
 
@@ -105,7 +106,10 @@ func (a *App) initClients() error {
 		a.closer.Add(func(ctx context.Context) error {
 			return a.referralClient.Close()
 		})
-		a.logger.Info("Referral client initialized",
+		// Campaign-сервис живёт в том же бинарнике что и referral (shared port).
+		// Переиспользуем *grpc.ClientConn, чтобы не плодить TCP-коннекты.
+		a.campaignClient = client.NewCampaignClient(a.referralClient.Conn(), a.logger)
+		a.logger.Info("Referral/Campaign client initialized",
 			zap.String("addr", a.config.Services.ReferralAddr))
 	}
 
@@ -242,6 +246,21 @@ func (a *App) Start() error {
 				r.Get("/referral/stats", referralHandler.GetStats)
 				r.Post("/referral/withdrawal", referralHandler.CreateWithdrawal)
 				r.Get("/referral/withdrawals", referralHandler.ListWithdrawals)
+			}
+
+			// ─── Admin API ──────────────────────────────────────────
+			// Все ручки под RequireAdmin (проверка role='admin' из JWT).
+			if a.campaignClient != nil {
+				adminCampaignsHandler := handler.NewAdminCampaignsHandler(a.campaignClient, a.logger)
+				r.Route("/admin/campaigns", func(r chi.Router) {
+					r.Use(gwmw.RequireAdmin)
+					r.Get("/", adminCampaignsHandler.List)
+					r.Post("/", adminCampaignsHandler.Create)
+					r.Get("/{id}", adminCampaignsHandler.Get)
+					r.Patch("/{id}", adminCampaignsHandler.Update)
+					r.Post("/{id}/archive", adminCampaignsHandler.Archive)
+					r.Get("/{id}/stats", adminCampaignsHandler.Stats)
+				})
 			}
 		})
 	})

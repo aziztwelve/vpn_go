@@ -263,6 +263,37 @@ func (s *AuthService) ValidateTelegramUser(ctx context.Context, initData, refTok
 		referralRegistered = s.tryRegisterReferral(ctx, resolvedRefToken, user.ID)
 	}
 
+	// Campaign attribution (first-touch). Параллельно с реферальной программой:
+	// юзер мог прийти и по ref-ссылке, и по src-ссылке одновременно — обе
+	// атрибуции независимы. Делаем только для НОВЫХ юзеров — зрелые юзеры
+	// (existing) не должны переатрибутироваться.
+	//
+	// Для существующих юзеров чистим pending_campaigns, чтобы не было мусора.
+	if isNewUser {
+		if campaignID, found, err := s.userRepo.PopPendingCampaign(ctx, telegramID); err != nil {
+			s.logger.Warn("PopPendingCampaign failed (non-blocking)",
+				zap.Int64("telegram_id", telegramID),
+				zap.Error(err),
+			)
+		} else if found {
+			if _, err := s.userRepo.InsertUserAttribution(ctx, user.ID, campaignID); err != nil {
+				s.logger.Warn("InsertUserAttribution failed (non-blocking)",
+					zap.Int64("user_id", user.ID),
+					zap.Int64("campaign_id", campaignID),
+					zap.Error(err),
+				)
+			} else {
+				s.logger.Info("user attributed to campaign",
+					zap.Int64("user_id", user.ID),
+					zap.Int64("campaign_id", campaignID),
+				)
+			}
+		}
+	} else {
+		// Existing user — чистим висящий pending (если был).
+		_, _, _ = s.userRepo.PopPendingCampaign(ctx, telegramID)
+	}
+
 	return &ValidateResult{
 		User:               user,
 		JWTToken:           token,
@@ -397,12 +428,68 @@ func (s *AuthService) SetPendingReferral(ctx context.Context, telegramID int64, 
 	return s.userRepo.UpsertPendingReferral(ctx, telegramID, refToken)
 }
 
+// CampaignSrcStartPrefix — префикс start-параметра для маркетинговых воронок.
+// Дублируется с константой в referral-service/service/campaign.go — оба сервиса
+// должны парсить одинаково. Изменение только в одном месте — баг.
+const CampaignSrcStartPrefix = "src_"
+
 // RecordBotStart фиксирует факт нажатия /start в боте (воронка бот → Mini App).
 // Возвращает stored=true только при первом нажатии (повторные /start от того
 // же telegram_id игнорируются — started_at не сдвигается).
-func (s *AuthService) RecordBotStart(ctx context.Context, telegramID int64, username, firstName, startParam string) (bool, error) {
+//
+// Если start_param имеет префикс "src_<slug>" и в БД есть активная кампания
+// с таким slug'ом — campaign_id будет проставлен в bot_starts. Это даёт
+// аналитику /start-метрики по воронкам без дополнительных round-trip'ов.
+//
+// Если slug не найден — start всё равно регистрируется, просто без атрибуции.
+// Возвращаемый campaignID = 0 в этом случае.
+func (s *AuthService) RecordBotStart(ctx context.Context, telegramID int64, username, firstName, startParam string) (stored bool, campaignID int64, err error) {
 	if telegramID <= 0 {
-		return false, fmt.Errorf("invalid telegram_id")
+		return false, 0, fmt.Errorf("invalid telegram_id")
 	}
-	return s.userRepo.InsertBotStart(ctx, telegramID, username, firstName, startParam)
+
+	// Резолв slug → campaign_id (best-effort: ошибка не блокирует трекинг).
+	if strings.HasPrefix(startParam, CampaignSrcStartPrefix) {
+		slug := strings.TrimPrefix(startParam, CampaignSrcStartPrefix)
+		if slug != "" {
+			id, found, resErr := s.userRepo.ResolveCampaignBySlug(ctx, slug)
+			if resErr != nil {
+				s.logger.Warn("ResolveCampaignBySlug failed (non-blocking)",
+					zap.String("slug", slug),
+					zap.Error(resErr),
+				)
+			} else if found {
+				campaignID = id
+			}
+		}
+	}
+
+	stored, err = s.userRepo.InsertBotStart(ctx, telegramID, username, firstName, startParam, campaignID)
+	return stored, campaignID, err
+}
+
+// SetPendingCampaign сохраняет связь telegram_id → campaign_id ДО того как
+// юзер откроет Mini App (аналог SetPendingReferral для маркетинговых воронок).
+// Вызывается ботом при /start src_<slug>.
+//
+// Если slug не найден или кампания архивирована — возвращает (0, nil) без
+// ошибки. Вызывающий по нулевому id может понять что атрибуции не будет.
+func (s *AuthService) SetPendingCampaign(ctx context.Context, telegramID int64, slug string) (int64, error) {
+	if telegramID <= 0 {
+		return 0, fmt.Errorf("invalid telegram_id")
+	}
+	if slug == "" {
+		return 0, fmt.Errorf("slug is required")
+	}
+	id, found, err := s.userRepo.ResolveCampaignBySlug(ctx, slug)
+	if err != nil {
+		return 0, err
+	}
+	if !found {
+		return 0, nil
+	}
+	if err := s.userRepo.UpsertPendingCampaign(ctx, telegramID, id); err != nil {
+		return 0, err
+	}
+	return id, nil
 }

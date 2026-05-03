@@ -33,6 +33,9 @@ func (c *AuthClient) Close() error {
 	return c.conn.Close()
 }
 
+// Conn returns the underlying gRPC connection (for health checks).
+func (c *AuthClient) Conn() *grpc.ClientConn { return c.conn }
+
 // ValidateTelegramUser — проксирует на auth-service. refToken опционален
 // (передаётся фронтом, если в start_param был префикс ref_<token>).
 func (c *AuthClient) ValidateTelegramUser(ctx context.Context, initData, refToken string) (*pb.ValidateTelegramUserResponse, error) {
@@ -75,7 +78,11 @@ func (c *AuthClient) SetPendingReferral(ctx context.Context, telegramID int64, r
 
 // RecordBotStart — фиксирует первое нажатие /start (для воронки бот → Mini App).
 // Best-effort: вызывается из webhook'а бота, ошибка не блокирует ответ юзеру.
-func (c *AuthClient) RecordBotStart(ctx context.Context, telegramID int64, username, firstName, startParam string) (bool, error) {
+//
+// Возвращает (stored, campaignID, err):
+//   - stored=true только при первом /start этого telegram_id
+//   - campaignID>0 если start_param = "src_<slug>" и кампания активна
+func (c *AuthClient) RecordBotStart(ctx context.Context, telegramID int64, username, firstName, startParam string) (bool, int64, error) {
 	resp, err := c.client.RecordBotStart(ctx, &pb.RecordBotStartRequest{
 		TelegramId: telegramID,
 		Username:   username,
@@ -83,7 +90,21 @@ func (c *AuthClient) RecordBotStart(ctx context.Context, telegramID int64, usern
 		StartParam: startParam,
 	})
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
-	return resp.Stored, nil
+	return resp.Stored, resp.CampaignId, nil
+}
+
+// SetPendingCampaign — сохранить campaign-атрибуцию по telegram_id ДО
+// регистрации в Mini App (вызывается из webhook'а бота при /start src_<slug>).
+// Возвращает campaignID=0 если slug не найден/архивирован (не ошибка).
+func (c *AuthClient) SetPendingCampaign(ctx context.Context, telegramID int64, slug string) (int64, error) {
+	resp, err := c.client.SetPendingCampaign(ctx, &pb.SetPendingCampaignRequest{
+		TelegramId: telegramID,
+		Slug:       slug,
+	})
+	if err != nil {
+		return 0, err
+	}
+	return resp.CampaignId, nil
 }

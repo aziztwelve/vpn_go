@@ -276,6 +276,15 @@ func (s *Referral) applyDaysBonus(ctx context.Context, recipientID, invitedID in
 // ─── ApplyBonus (на покупку) ────────────────────────────────────────
 
 // ApplyBonusResult — детали начисления партнёрского бонуса.
+//
+// Поля Applied/AlreadyApplied/NoRelationship/InviterUserID/InviterRole/BalanceAmount
+// относятся к классической реферальной программе (ref_<token>).
+//
+// Поля Campaign* — ПАРАЛЛЕЛЬНАЯ выплата по маркетинговой кампании (src_<slug>).
+// Юзер может одновременно быть и приглашённым (ref-token), и атрибутированным
+// к кампании (src-link). Тогда ApplyBonus начисляет ОБЕ выплаты, независимо.
+// На практике юзеры обычно идут одним путём — но архитектурно это два разных
+// канала и они не конкурируют.
 type ApplyBonusResult struct {
 	Applied        bool
 	AlreadyApplied bool
@@ -283,92 +292,173 @@ type ApplyBonusResult struct {
 	InviterUserID  int64
 	InviterRole    string
 	BalanceAmount  float64
+
+	// Кампания-атрибуция (опционально).
+	CampaignPayoutApplied        bool
+	CampaignPayoutAlreadyApplied bool
+	CampaignID                   int64
+	CampaignPartnerUserID        int64
+	CampaignPayoutAmount         float64
 }
 
 // ApplyBonus — вызывается из payment-service после успешной первой оплаты
 // приглашённого. Логика:
 //
-//  1. Найти relationship по invited_id; если нет — return NoRelationship
-//  2. Проверить идемпотентность по payment_id (UNIQUE на referral_bonuses.payment_id)
-//  3. Если inviter.role='partner' → начислить процент на баланс
-//  4. UPDATE relationship SET status='purchased' (один раз, idempotent)
+//  1. Найти relationship по invited_id для классического реф-канала
+//     (если нет — пропускаем эту ветку, но кампанию проверяем всё равно).
+//  2. Проверить идемпотентность по payment_id (UNIQUE на referral_bonuses.payment_id).
+//  3. Если inviter.role='partner' → начислить процент на баланс (ref-канал).
+//  4. UPDATE relationship SET status='purchased' (один раз, idempotent).
+//  5. ПАРАЛЛЕЛЬНО: проверить campaign-attribution. Если у юзера есть
+//     user_attribution и у кампании задан payout_percent → начислить
+//     процент партнёру кампании (campaign_payouts UNIQUE на payment_id).
 //
 // Для inviter.role='user' бонус уже выдан при регистрации — здесь только
 // маркируем relationship как purchased.
+//
+// Ref- и campaign-каналы идемпотентны независимо: даже если ref-bonus уже
+// был применён (AlreadyApplied=true), мы всё равно проверяем кампанию.
+// Это нужно потому что webhook-ретрай может произойти после того как ref
+// уже зачислился, а campaign-payout (например, добавленный через миграцию
+// данных позже) — нет.
 func (s *Referral) ApplyBonus(ctx context.Context, invitedID int64, amountRUB float64, paymentID int64) (*ApplyBonusResult, error) {
 	if invitedID <= 0 || amountRUB <= 0 || paymentID <= 0 {
 		return nil, errors.New("invalid arguments")
 	}
 
+	res := &ApplyBonusResult{}
+
+	// ─── Ref-канал ─────────────────────────────────────────────
 	rel, err := s.repo.GetRelationshipByInvited(ctx, invitedID)
 	if err != nil {
 		return nil, err
 	}
 	if rel == nil {
-		return &ApplyBonusResult{NoRelationship: true}, nil
-	}
-
-	inviter, err := s.repo.GetUserByID(ctx, rel.InviterID)
-	if err != nil {
-		return nil, err
-	}
-
-	res := &ApplyBonusResult{
-		InviterUserID: rel.InviterID,
-		InviterRole:   inviter.Role,
-	}
-
-	// Партнёрская часть: начислить процент. Идемпотентность по payment_id.
-	if inviter.Role == "partner" && s.cfg.PartnerPercent > 0 {
-		amount := amountRUB * float64(s.cfg.PartnerPercent) / 100.0
-		// Округляем до копейки чтобы не плодить хвосты.
-		amount = roundCents(amount)
-
-		bonus := &model.ReferralBonus{
-			UserID:        rel.InviterID,
-			InvitedUserID: invitedID,
-			BonusType:     model.BonusTypeBalance,
-			BalanceAmount: &amount,
-			PaymentID:     &paymentID,
-			IsApplied:     false,
+		res.NoRelationship = true
+	} else {
+		inviter, err := s.repo.GetUserByID(ctx, rel.InviterID)
+		if err != nil {
+			return nil, err
 		}
-		if err := s.repo.CreateBonus(ctx, bonus); err != nil {
-			if errors.Is(err, repository.ErrPaymentBonusExists) {
-				return &ApplyBonusResult{AlreadyApplied: true, InviterUserID: rel.InviterID, InviterRole: inviter.Role}, nil
+		res.InviterUserID = rel.InviterID
+		res.InviterRole = inviter.Role
+
+		if inviter.Role == "partner" && s.cfg.PartnerPercent > 0 {
+			amount := roundCents(amountRUB * float64(s.cfg.PartnerPercent) / 100.0)
+			bonus := &model.ReferralBonus{
+				UserID:        rel.InviterID,
+				InvitedUserID: invitedID,
+				BonusType:     model.BonusTypeBalance,
+				BalanceAmount: &amount,
+				PaymentID:     &paymentID,
+				IsApplied:     false,
 			}
-			return nil, fmt.Errorf("create partner bonus: %w", err)
+			err := s.repo.CreateBonus(ctx, bonus)
+			switch {
+			case errors.Is(err, repository.ErrPaymentBonusExists):
+				res.AlreadyApplied = true
+			case err != nil:
+				return nil, fmt.Errorf("create partner bonus: %w", err)
+			default:
+				if err := s.repo.AddBalance(ctx, rel.InviterID, amount); err != nil {
+					s.log.Error("add partner balance failed",
+						zap.Int64("inviter_id", rel.InviterID),
+						zap.Float64("amount", amount),
+						zap.Error(err),
+					)
+					return nil, fmt.Errorf("add balance: %w", err)
+				}
+				_ = s.repo.MarkBonusApplied(ctx, bonus.ID)
+				res.BalanceAmount = amount
+				res.Applied = true
+				s.log.Info("partner bonus applied",
+					zap.Int64("inviter_id", rel.InviterID),
+					zap.Int64("invited_id", invitedID),
+					zap.Int64("payment_id", paymentID),
+					zap.Float64("amount", amount),
+				)
+			}
 		}
 
-		// Зачисляем на баланс. Если упадёт — bonus останется is_applied=false.
-		if err := s.repo.AddBalance(ctx, rel.InviterID, amount); err != nil {
-			s.log.Error("add partner balance failed",
-				zap.Int64("inviter_id", rel.InviterID),
-				zap.Float64("amount", amount),
-				zap.Error(err),
-			)
-			return nil, fmt.Errorf("add balance: %w", err)
+		// Маркер purchased — независимо от того, прошёл ли бонус.
+		if rel.Status != model.RelationshipStatusPurchased {
+			if err := s.repo.MarkRelationshipPurchased(ctx, invitedID); err != nil {
+				s.log.Warn("mark relationship purchased failed", zap.Error(err))
+			}
 		}
-		_ = s.repo.MarkBonusApplied(ctx, bonus.ID)
-		res.BalanceAmount = amount
-		res.Applied = true
-
-		s.log.Info("partner bonus applied",
-			zap.Int64("inviter_id", rel.InviterID),
-			zap.Int64("invited_id", invitedID),
-			zap.Int64("payment_id", paymentID),
-			zap.Float64("amount", amount),
-		)
 	}
 
-	// Маркер purchased — для статистики (purchased_count) и чтобы понять
-	// что приглашённый "конвертировался".
-	if rel.Status != model.RelationshipStatusPurchased {
-		if err := s.repo.MarkRelationshipPurchased(ctx, invitedID); err != nil {
-			s.log.Warn("mark relationship purchased failed", zap.Error(err))
-		}
-	}
+	// ─── Campaign-канал (параллельно ref'у) ───────────────────
+	s.applyCampaignPayout(ctx, invitedID, amountRUB, paymentID, res)
 
 	return res, nil
+}
+
+// applyCampaignPayout — параллельная ветка ApplyBonus. Если у платящего юзера
+// есть user_attribution к кампании с payout_percent — начисляем партнёру
+// кампании на баланс. Идемпотентность по payment_id (UNIQUE в campaign_payouts).
+//
+// Все ошибки логируются, но НЕ роняют ApplyBonus — ref-канал важнее, чтобы
+// корректно вернуть NoRelationship/Applied для существующих юзеров.
+func (s *Referral) applyCampaignPayout(ctx context.Context, invitedID int64, amountRUB float64, paymentID int64, res *ApplyBonusResult) {
+	attr, err := s.repo.GetCampaignAttribution(ctx, invitedID)
+	if err != nil {
+		s.log.Warn("get campaign attribution failed (non-blocking)",
+			zap.Int64("invited_id", invitedID),
+			zap.Error(err),
+		)
+		return
+	}
+	if attr == nil {
+		return // нет атрибуции или у кампании нет выплат
+	}
+	res.CampaignID = attr.CampaignID
+	res.CampaignPartnerUserID = attr.PartnerUserID
+
+	amount := roundCents(amountRUB * float64(attr.PayoutPercent) / 100.0)
+	if amount <= 0 {
+		return
+	}
+
+	payoutID, err := s.repo.CreateCampaignPayout(ctx, attr.CampaignID, attr.PartnerUserID, invitedID, paymentID, amount)
+	if errors.Is(err, repository.ErrCampaignPayoutExists) {
+		res.CampaignPayoutAlreadyApplied = true
+		s.log.Info("campaign payout already applied",
+			zap.Int64("campaign_id", attr.CampaignID),
+			zap.Int64("payment_id", paymentID),
+		)
+		return
+	}
+	if err != nil {
+		s.log.Error("create campaign payout failed",
+			zap.Int64("campaign_id", attr.CampaignID),
+			zap.Int64("payment_id", paymentID),
+			zap.Error(err),
+		)
+		return
+	}
+
+	if err := s.repo.AddBalance(ctx, attr.PartnerUserID, amount); err != nil {
+		s.log.Error("add campaign partner balance failed",
+			zap.Int64("partner_id", attr.PartnerUserID),
+			zap.Int64("payout_id", payoutID),
+			zap.Float64("amount", amount),
+			zap.Error(err),
+		)
+		// Запись осталась с is_applied=false — можно ретрайнуть позже.
+		return
+	}
+	_ = s.repo.MarkCampaignPayoutApplied(ctx, payoutID)
+
+	res.CampaignPayoutApplied = true
+	res.CampaignPayoutAmount = amount
+	s.log.Info("campaign payout applied",
+		zap.Int64("campaign_id", attr.CampaignID),
+		zap.Int64("partner_id", attr.PartnerUserID),
+		zap.Int64("invited_id", invitedID),
+		zap.Int64("payment_id", paymentID),
+		zap.Float64("amount", amount),
+	)
 }
 
 // ─── GetReferralStats ───────────────────────────────────────────────

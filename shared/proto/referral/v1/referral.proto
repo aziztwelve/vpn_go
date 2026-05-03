@@ -110,12 +110,21 @@ message ApplyBonusRequest {
 }
 
 message ApplyBonusResponse {
-  bool applied = 1;             // true → бонус начислен
-  bool already_applied = 2;     // true → этот payment_id уже обрабатывался
+  bool applied = 1;             // true → бонус начислен (ref-канал)
+  bool already_applied = 2;     // true → этот payment_id уже обрабатывался (ref-канал)
   bool no_relationship = 3;     // true → у юзера нет inviter'а
   int64 inviter_user_id = 4;
   string inviter_role = 5;      // user, partner
   string balance_amount_rub = 6; // сумма зачисленная на partner.balance (Decimal as string)
+
+  // ─── Параллельная ветка: маркетинговая кампания (src_<slug>) ───
+  // Юзер мог одновременно прийти и по ref_<token>, и по src_<slug>.
+  // Кампания обрабатывается независимо от ref-канала.
+  bool campaign_payout_applied = 7;
+  bool campaign_payout_already_applied = 8;
+  int64 campaign_id = 9;        // 0 если нет атрибуции к кампании
+  int64 campaign_partner_user_id = 10;
+  string campaign_payout_amount_rub = 11; // Decimal as string
 }
 
 // ─── GetReferralStats ───────────────────────────────────────────────

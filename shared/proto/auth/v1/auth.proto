@@ -35,7 +35,15 @@ service AuthService {
   // ON CONFLICT DO NOTHING — повторные /start не перезаписывают started_at.
   // opened_app_at проставится позже в ValidateTelegramUser при первом
   // открытии Mini App тем же telegram_id.
+  // Если start_param имеет префикс "src_<slug>" и кампания активна,
+  // в bot_starts.campaign_id будет проставлен её id.
   rpc RecordBotStart(RecordBotStartRequest) returns (RecordBotStartResponse);
+
+  // Сохраняет pending атрибуцию к маркетинговой кампании по telegram_id
+  // (аналог SetPendingReferral, но для воронок). Вызывается ботом при
+  // /start src_<slug>. Upsert: последний clicker побеждает.
+  // Если slug не найден или кампания архивирована — возвращает stored=false.
+  rpc SetPendingCampaign(SetPendingCampaignRequest) returns (SetPendingCampaignResponse);
 }
 
 message ValidateTelegramUserRequest {
@@ -118,6 +126,19 @@ message RecordBotStartRequest {
 
 message RecordBotStartResponse {
   bool stored = 1; // true если запись была вставлена (первое нажатие /start)
+  // Кампания, к которой удалось атрибутировать /start (если start_param =
+  // "src_<slug>" и кампания активна). 0 = не атрибутирован.
+  int64 campaign_id = 2;
+}
+
+message SetPendingCampaignRequest {
+  int64  telegram_id = 1;
+  string slug        = 2; // чистый slug (без префикса src_)
+}
+
+message SetPendingCampaignResponse {
+  bool   stored      = 1;
+  int64  campaign_id = 2; // 0 если slug не найден / кампания архивирована
 }
 
 message User {

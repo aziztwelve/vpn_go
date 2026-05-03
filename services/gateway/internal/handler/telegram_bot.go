@@ -19,6 +19,11 @@ import (
 // Telegram передаёт боту "ref_<token>" в команде "/start ref_<token>".
 const refStartParamPrefix = "ref_"
 
+// srcStartParamPrefix — префикс для deep-link маркетинговой воронки (кампании).
+// Формат: https://t.me/<bot>?start=src_<slug>
+// Атрибуция к кампании — независима от реферальной программы (ref_).
+const srcStartParamPrefix = "src_"
+
 // TelegramBotHandler обрабатывает команды и callback'и от Telegram бота
 type TelegramBotHandler struct {
 	telegramClient     *telegram.Client
@@ -122,9 +127,14 @@ func (h *TelegramBotHandler) handleCommand(ctx context.Context, msg *Message) {
 	}
 }
 
-// handleStart обрабатывает /start [param]. Если param == "ref_<token>" —
-// сохраняем атрибуцию через auth-service, чтобы при первом ValidateTelegramUser
-// (когда юзер откроет Mini App) рефералка зарегистрировалась.
+// handleStart обрабатывает /start [param]. Поддерживаемые параметры:
+//
+//	ref_<token> — реферальная ссылка (персональная от юзера)
+//	src_<slug>  — маркетинговая воронка/кампания (от админа для блогера)
+//
+// Оба варианта независимы: юзер может прийти по ref'у и это не мешает
+// одновременной атрибуции к кампании (разные pending-таблицы).
+// Атрибуция окончательно запишется в ValidateTelegramUser при первом открытии Mini App.
 //
 // Также фиксируем сам факт нажатия /start в bot_starts (воронка бот → Mini App).
 // Telegram update не содержит last_name, поэтому передаём только username/first_name.
@@ -135,14 +145,16 @@ func (h *TelegramBotHandler) handleStart(ctx context.Context, chatID, telegramUs
 		firstName = from.FirstName
 	}
 
-	// Воронка: фиксируем нажатие /start. Best-effort, ошибка не блокирует UX.
-	if _, err := h.authClient.RecordBotStart(ctx, telegramUserID, username, firstName, startParam); err != nil {
+	// Воронка: фиксируем нажатие /start. auth-service сам резолвит src_<slug>
+	// в campaign_id при записи в bot_starts. Best-effort.
+	if _, _, err := h.authClient.RecordBotStart(ctx, telegramUserID, username, firstName, startParam); err != nil {
 		h.logger.Warn("Failed to record bot start",
 			zap.Int64("telegram_id", telegramUserID),
 			zap.Error(err))
 	}
 
-	if strings.HasPrefix(startParam, refStartParamPrefix) {
+	switch {
+	case strings.HasPrefix(startParam, refStartParamPrefix):
 		token := strings.TrimPrefix(startParam, refStartParamPrefix)
 		if token != "" {
 			if err := h.authClient.SetPendingReferral(ctx, telegramUserID, token); err != nil {
@@ -156,6 +168,29 @@ func (h *TelegramBotHandler) handleStart(ctx context.Context, chatID, telegramUs
 				h.logger.Info("Pending referral stored from /start",
 					zap.Int64("telegram_id", telegramUserID),
 					zap.String("ref_token", token))
+			}
+		}
+
+	case strings.HasPrefix(startParam, srcStartParamPrefix):
+		slug := strings.TrimPrefix(startParam, srcStartParamPrefix)
+		if slug != "" {
+			campaignID, err := h.authClient.SetPendingCampaign(ctx, telegramUserID, slug)
+			if err != nil {
+				// Best-effort: ошибка не блокирует UX.
+				h.logger.Warn("Failed to store pending campaign",
+					zap.Int64("telegram_id", telegramUserID),
+					zap.String("slug", slug),
+					zap.Error(err))
+			} else if campaignID == 0 {
+				// slug не найден / кампания архивирована — ссылка протухла.
+				h.logger.Info("Campaign slug not found or archived",
+					zap.Int64("telegram_id", telegramUserID),
+					zap.String("slug", slug))
+			} else {
+				h.logger.Info("Pending campaign stored from /start",
+					zap.Int64("telegram_id", telegramUserID),
+					zap.String("slug", slug),
+					zap.Int64("campaign_id", campaignID))
 			}
 		}
 	}

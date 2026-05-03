@@ -30,6 +30,9 @@ func NewReferralClient(addr string, logger *zap.Logger) (*ReferralClient, error)
 	}, nil
 }
 
+// Conn returns the underlying gRPC connection (for health checks).
+func (c *ReferralClient) Conn() *grpc.ClientConn { return c.conn }
+
 func (c *ReferralClient) Close() error {
 	return c.conn.Close()
 }

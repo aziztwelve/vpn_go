@@ -11,6 +11,7 @@ import (
 	"github.com/vpn/referral-service/internal/config"
 	"github.com/vpn/referral-service/internal/repository"
 	"github.com/vpn/referral-service/internal/service"
+	campaignpb "github.com/vpn/shared/pkg/proto/campaign/v1"
 	pb "github.com/vpn/shared/pkg/proto/referral/v1"
 	subpb "github.com/vpn/shared/pkg/proto/subscription/v1"
 	"go.uber.org/zap"
@@ -87,8 +88,16 @@ func (a *App) initGRPC() error {
 	svc := service.New(repo, subClient, a.config.Referral, a.logger)
 	apiSrv := api.New(svc, a.logger)
 
+	// Campaign-сервис живёт в том же бинарнике (shared DB, shared port).
+	// BotUsername переиспользуем из ReferralConfig — один бот на всё приложение.
+	campaignSvc := service.NewCampaign(repo, service.CampaignConfig{
+		BotUsername: a.config.Referral.BotUsername,
+	}, a.logger)
+	campaignAPI := api.NewCampaign(campaignSvc, a.logger)
+
 	a.grpcServer = grpc.NewServer()
 	pb.RegisterReferralServiceServer(a.grpcServer, apiSrv)
+	campaignpb.RegisterCampaignServiceServer(a.grpcServer, campaignAPI)
 	reflection.Register(a.grpcServer)
 
 	a.closer.Add(func(ctx context.Context) error {

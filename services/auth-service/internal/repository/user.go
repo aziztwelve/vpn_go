@@ -227,20 +227,92 @@ func (r *UserRepository) PopPendingReferral(ctx context.Context, telegramID int6
 // ON CONFLICT DO NOTHING — повторные /start от того же telegram_id не сдвигают
 // started_at. Возвращает stored=true только если запись действительно вставилась
 // (первое нажатие).
-func (r *UserRepository) InsertBotStart(ctx context.Context, telegramID int64, username, firstName, startParam string) (bool, error) {
+//
+// campaignID опционально (0 = не атрибутировать к кампании). Резолв slug→id
+// делается выше в сервисе (см. ResolveCampaignBySlug).
+func (r *UserRepository) InsertBotStart(ctx context.Context, telegramID int64, username, firstName, startParam string, campaignID int64) (bool, error) {
 	const q = `
-		INSERT INTO bot_starts (telegram_id, username, first_name, start_param)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO bot_starts (telegram_id, username, first_name, start_param, campaign_id)
+		VALUES ($1, $2, $3, $4, NULLIF($5, 0))
 		ON CONFLICT (telegram_id) DO NOTHING
 		RETURNING telegram_id
 	`
 	var inserted int64
-	err := r.db.QueryRow(ctx, q, telegramID, username, firstName, startParam).Scan(&inserted)
+	err := r.db.QueryRow(ctx, q, telegramID, username, firstName, startParam, campaignID).Scan(&inserted)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, nil // дубликат — это норма
 		}
 		return false, fmt.Errorf("insert bot_start: %w", err)
+	}
+	return true, nil
+}
+
+// ResolveCampaignBySlug возвращает id активной кампании по slug'у.
+// Возвращает 0, false если slug не найден или кампания архивирована.
+// Используется в InsertBotStart и SetPendingCampaign.
+func (r *UserRepository) ResolveCampaignBySlug(ctx context.Context, slug string) (int64, bool, error) {
+	const q = `SELECT id FROM campaigns WHERE slug = $1 AND is_active = TRUE`
+	var id int64
+	err := r.db.QueryRow(ctx, q, slug).Scan(&id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf("resolve campaign slug: %w", err)
+	}
+	return id, true, nil
+}
+
+// UpsertPendingCampaign сохраняет/перезаписывает pending атрибуцию к
+// маркетинговой кампании по telegram_id (аналог UpsertPendingReferral).
+// Один telegram_id = одна кампания (последний clicker побеждает).
+func (r *UserRepository) UpsertPendingCampaign(ctx context.Context, telegramID, campaignID int64) error {
+	const q = `
+		INSERT INTO pending_campaigns (telegram_id, campaign_id)
+		VALUES ($1, $2)
+		ON CONFLICT (telegram_id) DO UPDATE
+		SET campaign_id = EXCLUDED.campaign_id, created_at = NOW()
+	`
+	_, err := r.db.Exec(ctx, q, telegramID, campaignID)
+	if err != nil {
+		return fmt.Errorf("upsert pending campaign: %w", err)
+	}
+	return nil
+}
+
+// PopPendingCampaign возвращает campaign_id по telegram_id и удаляет запись
+// (атомарно). Если записи нет — возвращает (0, false, nil).
+func (r *UserRepository) PopPendingCampaign(ctx context.Context, telegramID int64) (int64, bool, error) {
+	const q = `DELETE FROM pending_campaigns WHERE telegram_id = $1 RETURNING campaign_id`
+	var campaignID int64
+	err := r.db.QueryRow(ctx, q, telegramID).Scan(&campaignID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf("pop pending campaign: %w", err)
+	}
+	return campaignID, true, nil
+}
+
+// InsertUserAttribution создаёт запись о first-touch атрибуции юзера к кампании.
+// Идемпотентно: если запись уже есть (юзер ранее атрибутирован) — не перезаписывает,
+// возвращает stored=false. Это гарантирует что первое касание навсегда.
+func (r *UserRepository) InsertUserAttribution(ctx context.Context, userID, campaignID int64) (bool, error) {
+	const q = `
+		INSERT INTO user_attribution (user_id, campaign_id)
+		VALUES ($1, $2)
+		ON CONFLICT (user_id) DO NOTHING
+		RETURNING user_id
+	`
+	var inserted int64
+	err := r.db.QueryRow(ctx, q, userID, campaignID).Scan(&inserted)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("insert user attribution: %w", err)
 	}
 	return true, nil
 }

@@ -1,0 +1,147 @@
+syntax = "proto3";
+
+package campaign.v1;
+
+option go_package = "github.com/vpn/shared/pkg/proto/campaign/v1";
+
+// CampaignService — управление маркетинговыми воронками (кампаниями).
+//
+// Суть:
+//   - Админ создаёт кампанию с уникальным slug'ом и опциональной привязкой
+//     к partner-юзеру (% с оплат рефералов).
+//   - Получает deep-link https://t.me/<bot>?start=src_<slug>, который отдаёт
+//     блогеру/партнёру для постинга.
+//   - Когда новый юзер регистрируется через эту ссылку, он навсегда
+//     привязывается к кампании (first-touch attribution через user_attribution).
+//   - Метрики (clicks /start → opened Mini App → trial → first paid → revenue)
+//     рассчитываются JOIN'ом по существующим таблицам (bot_starts, users,
+//     subscriptions, payments).
+//
+// Все методы — admin-only (gateway middleware проверяет JWT.role='admin').
+// Сервис хостится в том же бинарнике что и ReferralService (они тематически
+// рядом и share одну БД), но регистрируется отдельно для чистоты API.
+service CampaignService {
+  rpc CreateCampaign(CreateCampaignRequest) returns (Campaign);
+  rpc UpdateCampaign(UpdateCampaignRequest) returns (Campaign);
+  rpc ArchiveCampaign(ArchiveCampaignRequest) returns (Campaign);
+  rpc GetCampaign(GetCampaignRequest) returns (CampaignWithStats);
+  rpc ListCampaigns(ListCampaignsRequest) returns (ListCampaignsResponse);
+  rpc GetCampaignStats(GetCampaignStatsRequest) returns (CampaignStats);
+}
+
+// ─── Campaign ──────────────────────────────────────────────────────
+
+message Campaign {
+  int64 id = 1;
+  string slug = 2;                  // [a-z0-9_-]{3,60}
+  string name = 3;
+  string notes = 4;
+
+  // Партнёр-получатель %. Опционален.
+  // payout_percent ИЛИ оба заданы, ИЛИ оба пустые.
+  int64 partner_user_id = 5;        // 0 = не задан
+  int32 payout_percent = 6;         // 0 = не задан (0..50 валидация)
+
+  bool is_active = 7;
+  int64 created_by = 8;
+  string created_at = 9;            // RFC3339
+  string archived_at = 10;          // RFC3339, "" если не архивирована
+
+  // Полный deep-link для шаринга (вычисляется на бэкенде из slug + bot username).
+  string deep_link = 11;
+}
+
+message CreateCampaignRequest {
+  string slug = 1;                  // обязателен, валидируется regexp'ом
+  string name = 2;                  // обязателен
+  string notes = 3;
+  int64 partner_user_id = 4;        // 0 = без партнёра
+  int32 payout_percent = 5;         // 0 = без выплат
+  int64 created_by_user_id = 6;     // gateway проставляет из JWT.user_id
+}
+
+message UpdateCampaignRequest {
+  int64 id = 1;
+  // Все поля ниже — опциональны (gRPC: пустые значения = "не менять").
+  // Slug менять НЕЛЬЗЯ (deep-link'и уже у блогера на руках).
+  string name = 2;
+  string notes = 3;
+  // Чтобы "обнулить" партнёра, передай partner_user_id=-1.
+  int64 partner_user_id = 4;
+  // Чтобы "обнулить" payout — передай -1.
+  int32 payout_percent = 5;
+}
+
+message ArchiveCampaignRequest {
+  int64 id = 1;
+}
+
+message GetCampaignRequest {
+  int64 id = 1;
+  // Период для статистики. Пустая строка = за всё время.
+  string from = 2;                  // RFC3339
+  string to = 3;                    // RFC3339
+}
+
+message ListCampaignsRequest {
+  // include_archived=false → только is_active.
+  bool include_archived = 1;
+  int32 limit = 2;                  // default 100, max 500
+  int32 offset = 3;
+}
+
+message ListCampaignsResponse {
+  repeated CampaignWithStats campaigns = 1;
+  int32 total = 2;
+}
+
+// ─── Stats ──────────────────────────────────────────────────────────
+
+// CampaignStats — воронка кампании за период (или за всё время).
+//
+// Conversion-проценты на фронте считаем сами от соседних шагов:
+//   start_to_app = opened_app / starts
+//   app_to_trial = trial_activated / opened_app
+//   app_to_paid  = paid_users / opened_app
+message CampaignStats {
+  int64 campaign_id = 1;
+
+  // Шаг 1: /start в боте (по этой кампании).
+  // = COUNT(*) FROM bot_starts WHERE campaign_id=X
+  int32 starts = 2;
+
+  // Шаг 2: открыли Mini App = новые users-record'ы атрибутированные к кампании.
+  int32 opened_app = 3;
+
+  // Шаг 3: активировали триал.
+  // = COUNT(DISTINCT user_id) FROM subscriptions s JOIN user_attribution
+  // WHERE ua.campaign_id=X AND s.status IN ('trial','active') AND s.created_at >= attributed_at
+  int32 trial_activated = 4;
+
+  // Шаг 4: совершили хотя бы одну успешную оплату.
+  int32 paid_users = 5;
+
+  // Сумма всех успешных оплат (Decimal as string, в ₽).
+  string revenue_rub = 6;
+
+  // Сколько начислено партнёру по этой кампании за период
+  // (sum of campaign_payouts.amount). Для аналитики выплат.
+  string partner_payouts_rub = 7;
+
+  // Период за который считалось (для отображения на UI).
+  string from = 8;
+  string to = 9;
+}
+
+// CampaignWithStats — кампания + базовые stats для отображения в списке.
+// Для детальной страницы — отдельный GetCampaignStats с фильтром по периоду.
+message CampaignWithStats {
+  Campaign campaign = 1;
+  CampaignStats stats = 2;
+}
+
+message GetCampaignStatsRequest {
+  int64 campaign_id = 1;
+  string from = 2;
+  string to = 3;
+}

@@ -156,11 +156,14 @@ func (a *AuthAPI) SetPendingReferral(ctx context.Context, req *pb.SetPendingRefe
 
 // RecordBotStart — записываем нажатие /start в боте (воронка бот → Mini App).
 // Idempotent через ON CONFLICT DO NOTHING: stored=false на повторных нажатиях.
+//
+// Если start_param = "src_<slug>" и кампания активна — campaign_id будет
+// заполнен в bot_starts и вернётся в ответе (для аналитики).
 func (a *AuthAPI) RecordBotStart(ctx context.Context, req *pb.RecordBotStartRequest) (*pb.RecordBotStartResponse, error) {
 	if req.TelegramId <= 0 {
 		return nil, status.Error(codes.InvalidArgument, "telegram_id is required")
 	}
-	stored, err := a.authService.RecordBotStart(ctx, req.TelegramId, req.Username, req.FirstName, req.StartParam)
+	stored, campaignID, err := a.authService.RecordBotStart(ctx, req.TelegramId, req.Username, req.FirstName, req.StartParam)
 	if err != nil {
 		a.logger.Error("Failed to record bot start",
 			zap.Int64("telegram_id", req.TelegramId),
@@ -173,9 +176,45 @@ func (a *AuthAPI) RecordBotStart(ctx context.Context, req *pb.RecordBotStartRequ
 			zap.Int64("telegram_id", req.TelegramId),
 			zap.String("username", req.Username),
 			zap.String("start_param", req.StartParam),
+			zap.Int64("campaign_id", campaignID),
 		)
 	}
-	return &pb.RecordBotStartResponse{Stored: stored}, nil
+	return &pb.RecordBotStartResponse{Stored: stored, CampaignId: campaignID}, nil
+}
+
+// SetPendingCampaign — bot-side вход для /start src_<slug>. Вызывается когда
+// юзер кликает deep-link воронки и попадает в бот ДО открытия Mini App.
+// ValidateTelegramUser потом "съест" эту запись при первой регистрации и
+// положит её в user_attribution (first-touch, навсегда).
+//
+// Если slug не найден / кампания архивирована → stored=false, campaign_id=0
+// (без ошибки, это ожидаемый кейс старых ссылок).
+func (a *AuthAPI) SetPendingCampaign(ctx context.Context, req *pb.SetPendingCampaignRequest) (*pb.SetPendingCampaignResponse, error) {
+	if req.TelegramId <= 0 {
+		return nil, status.Error(codes.InvalidArgument, "telegram_id is required")
+	}
+	if req.Slug == "" {
+		return nil, status.Error(codes.InvalidArgument, "slug is required")
+	}
+	campaignID, err := a.authService.SetPendingCampaign(ctx, req.TelegramId, req.Slug)
+	if err != nil {
+		a.logger.Error("Failed to set pending campaign",
+			zap.Int64("telegram_id", req.TelegramId),
+			zap.String("slug", req.Slug),
+			zap.Error(err),
+		)
+		return nil, status.Error(codes.Internal, "failed to set pending campaign")
+	}
+	if campaignID == 0 {
+		// slug не найден или кампания архивирована — не ошибка.
+		return &pb.SetPendingCampaignResponse{Stored: false}, nil
+	}
+	a.logger.Info("pending campaign set",
+		zap.Int64("telegram_id", req.TelegramId),
+		zap.String("slug", req.Slug),
+		zap.Int64("campaign_id", campaignID),
+	)
+	return &pb.SetPendingCampaignResponse{Stored: true, CampaignId: campaignID}, nil
 }
 
 func (a *AuthAPI) VerifyToken(ctx context.Context, req *pb.VerifyTokenRequest) (*pb.VerifyTokenResponse, error) {

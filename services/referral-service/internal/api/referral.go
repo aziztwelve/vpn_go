@@ -103,12 +103,17 @@ func (a *API) ApplyBonus(ctx context.Context, req *pb.ApplyBonusRequest) (*pb.Ap
 		return nil, status.Error(codes.Internal, "failed to apply bonus")
 	}
 	return &pb.ApplyBonusResponse{
-		Applied:           res.Applied,
-		AlreadyApplied:    res.AlreadyApplied,
-		NoRelationship:    res.NoRelationship,
-		InviterUserId:     res.InviterUserID,
-		InviterRole:       res.InviterRole,
-		BalanceAmountRub:  fmt.Sprintf("%.2f", res.BalanceAmount),
+		Applied:                      res.Applied,
+		AlreadyApplied:               res.AlreadyApplied,
+		NoRelationship:               res.NoRelationship,
+		InviterUserId:                res.InviterUserID,
+		InviterRole:                  res.InviterRole,
+		BalanceAmountRub:             fmt.Sprintf("%.2f", res.BalanceAmount),
+		CampaignPayoutApplied:        res.CampaignPayoutApplied,
+		CampaignPayoutAlreadyApplied: res.CampaignPayoutAlreadyApplied,
+		CampaignId:                   res.CampaignID,
+		CampaignPartnerUserId:        res.CampaignPartnerUserID,
+		CampaignPayoutAmountRub:      fmt.Sprintf("%.2f", res.CampaignPayoutAmount),
 	}, nil
 }
 
