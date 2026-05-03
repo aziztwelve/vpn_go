@@ -243,15 +243,18 @@ trial_users AS (
       AND (params.dt_to   IS NULL OR s.created_at <  params.dt_to)
 ),
 paid AS (
+    -- status='paid' — терминальный успешный стейт (см. payments-service).
+    -- amount_rub — сумма в рублях (revenue в CampaignStats.RevenueRUB).
+    -- paid_at — момент поступления денег (индексирован).
     SELECT
       COUNT(DISTINCT p.user_id)::int                   AS n,
-      COALESCE(SUM(p.amount), 0)::float8               AS revenue
+      COALESCE(SUM(p.amount_rub), 0)::float8           AS revenue
     FROM payments p
     JOIN user_attribution ua ON ua.user_id = p.user_id
     JOIN params ON ua.campaign_id = params.cid
-    WHERE p.status = 'completed'
-      AND (params.dt_from IS NULL OR p.completed_at >= params.dt_from)
-      AND (params.dt_to   IS NULL OR p.completed_at <  params.dt_to)
+    WHERE p.status = 'paid'
+      AND (params.dt_from IS NULL OR p.paid_at >= params.dt_from)
+      AND (params.dt_to   IS NULL OR p.paid_at <  params.dt_to)
 ),
 payouts AS (
     SELECT COALESCE(SUM(amount), 0)::float8 AS total
