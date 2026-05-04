@@ -11,11 +11,14 @@ import (
 	"github.com/vpn/auth-service/internal/repository"
 	"github.com/vpn/auth-service/internal/service"
 	"github.com/vpn/platform/pkg/closer"
+	grpchealth "github.com/vpn/platform/pkg/grpc/health"
+	"github.com/vpn/platform/pkg/telegram"
 	pb "github.com/vpn/shared/pkg/proto/auth/v1"
 	referralpb "github.com/vpn/shared/pkg/proto/referral/v1"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/reflection"
 )
 
 type App struct {
@@ -26,6 +29,11 @@ type App struct {
 	closer     *closer.Closer
 
 	referralConn *grpc.ClientConn // nil если REFERRAL_SERVICE_ADDR не задан
+
+	// retentionCron — ежедневный генератор retention-drafts. nil если
+	// RETENTION_CRON_ENABLED=false. Run запускается в Start() в goroutine,
+	// останавливается через closer (cancellation context).
+	retentionCron *service.RetentionCron
 }
 
 func New(logger *zap.Logger) (*App, error) {
@@ -54,7 +62,38 @@ func New(logger *zap.Logger) (*App, error) {
 		return nil, fmt.Errorf("failed to init gRPC: %w", err)
 	}
 
+	// Инициализируем retention cron (если включён). Запуск — в Start().
+	if err := app.initRetentionCron(); err != nil {
+		return nil, fmt.Errorf("failed to init retention cron: %w", err)
+	}
+
 	return app, nil
+}
+
+// initRetentionCron конструирует RetentionCron если RETENTION_CRON_ENABLED=true.
+// Ошибки конструктора здесь невозможны (New не возвращает err), но форм-метод
+// оставлен чтобы проще было добавить валидацию RunAtUTC / MiniAppURL позже.
+func (a *App) initRetentionCron() error {
+	if !a.config.Retention.Enabled {
+		a.logger.Info("Retention cron disabled (RETENTION_CRON_ENABLED=false)")
+		return nil
+	}
+	tgClient := telegram.New(a.config.Telegram.BotToken)
+	broadcastRepo := repository.NewBroadcastRepository(a.db)
+	a.retentionCron = service.NewRetentionCron(
+		broadcastRepo,
+		tgClient,
+		service.RetentionCronConfig{
+			Enabled:         a.config.Retention.Enabled,
+			RunAtUTC:        a.config.Retention.RunAtUTC,
+			MiniAppURL:      a.config.Retention.MiniAppURL,
+			SupportUsername: a.config.Retention.SupportUsername,
+		},
+		a.logger,
+	)
+	a.logger.Info("Retention cron initialized",
+		zap.String("run_at_utc", a.config.Retention.RunAtUTC))
+	return nil
 }
 
 func (a *App) initDB() error {
@@ -122,6 +161,13 @@ func (a *App) initGRPC() error {
 	// Create gRPC server
 	a.grpcServer = grpc.NewServer()
 	pb.RegisterAuthServiceServer(a.grpcServer, authAPI)
+	reflection.Register(a.grpcServer)
+
+	// gRPC Health (gRPC Health v1) — пинг БД для readiness-проверки.
+	// Используется агрегатором /ready в Gateway.
+	grpchealth.RegisterServiceWithChecks(a.grpcServer, func(ctx context.Context) error {
+		return a.db.Ping(ctx)
+	})
 
 	a.closer.Add(func(ctx context.Context) error {
 		a.grpcServer.GracefulStop()
@@ -145,6 +191,18 @@ func (a *App) Start() error {
 			a.logger.Fatal("gRPC server error", zap.Error(err))
 		}
 	}()
+
+	// Запускаем retention cron в фоне. cancellation через отдельный контекст,
+	// зарегистрированный в closer'е — при Stop() context.Done() триггернётся
+	// и горутина корректно выйдет из Run().
+	if a.retentionCron != nil {
+		cronCtx, cancel := context.WithCancel(context.Background())
+		a.closer.Add(func(ctx context.Context) error {
+			cancel()
+			return nil
+		})
+		go a.retentionCron.Run(cronCtx)
+	}
 
 	return nil
 }

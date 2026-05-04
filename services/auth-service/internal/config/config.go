@@ -7,12 +7,13 @@ import (
 )
 
 type Config struct {
-	GRPC     GRPCConfig
-	DB       DBConfig
-	JWT      JWTConfig
-	Telegram TelegramConfig
-	Services ServicesConfig
-	Log      LogConfig
+	GRPC      GRPCConfig
+	DB        DBConfig
+	JWT       JWTConfig
+	Telegram  TelegramConfig
+	Services  ServicesConfig
+	Retention RetentionConfig
+	Log       LogConfig
 }
 
 // ServicesConfig — внешние gRPC сервисы.
@@ -41,6 +42,18 @@ type JWTConfig struct {
 
 type TelegramConfig struct {
 	BotToken string
+}
+
+// RetentionConfig — параметры RetentionCron'а.
+// Enabled=false полностью выключает крон (для dev/test или если мы хотим
+// временно прервать рассылки). MiniAppURL и SupportUsername подставляются
+// в ссылки inline-кнопок превью и (когда Stage 3 приедет) в шаблоны
+// сообщений юзерам.
+type RetentionConfig struct {
+	Enabled         bool
+	RunAtUTC        string // "HH:MM", default "14:00" = 17:00 МСК
+	MiniAppURL      string // https://app.maydavpn.com или аналог
+	SupportUsername string // без @
 }
 
 type LogConfig struct {
@@ -85,6 +98,12 @@ func New() (*Config, error) {
 		Services: ServicesConfig{
 			ReferralAddr: getEnv("REFERRAL_SERVICE_ADDR", ""),
 		},
+		Retention: RetentionConfig{
+			Enabled:         getEnvBool("RETENTION_CRON_ENABLED", true),
+			RunAtUTC:        getEnv("RETENTION_CRON_AT_UTC", "14:00"),
+			MiniAppURL:      getEnv("MINI_APP_URL", "https://app.maydavpn.com"),
+			SupportUsername: getEnv("SUPPORT_USERNAME", "maydavpn_support"),
+		},
 		Log: LogConfig{
 			Level: getEnv("LOG_LEVEL", "info"),
 		},
@@ -109,4 +128,22 @@ func getEnv(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+// getEnvBool — "true"/"1"/"yes" → true; "false"/"0"/"no" → false; пусто → default.
+// Регистронезависимо. Любое другое значение = default (не фейлим, чтобы
+// опечатка в env не ломала старт).
+func getEnvBool(key string, defaultValue bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return defaultValue
+	}
+	switch v {
+	case "true", "TRUE", "True", "1", "yes", "YES", "Yes":
+		return true
+	case "false", "FALSE", "False", "0", "no", "NO", "No":
+		return false
+	default:
+		return defaultValue
+	}
 }
