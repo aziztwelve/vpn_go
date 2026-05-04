@@ -3,6 +3,9 @@
 // BroadcastService живёт в auth-service бинарнике (один порт, общая БД), так
 // что переиспользуем `*grpc.ClientConn` от AuthClient. Отдельный коннект
 // здесь не открывается.
+//
+// authFromTelegramID / authFromUserID — конструкторы Auth-сообщения для
+// двух call-flows (бот-callback и HTTP админка соответственно).
 package client
 
 import (
@@ -27,20 +30,82 @@ func NewBroadcastClient(conn *grpc.ClientConn, logger *zap.Logger) *BroadcastCli
 	}
 }
 
-// ApproveBroadcast — admin click "✅ Approve #N" → callback запускает sender.
-// Возвращается мгновенно (sender в фоне на auth-service).
-func (c *BroadcastClient) ApproveBroadcast(ctx context.Context, draftID, adminTelegramID int64) (*pb.ApproveBroadcastResponse, error) {
+// authFromTelegramID — для callback-handler'ов бота (admin берётся из
+// CallbackQuery.From.ID).
+func authFromTelegramID(tgID int64) *pb.Auth {
+	return &pb.Auth{AdminTelegramId: tgID}
+}
+
+// authFromUserID — для HTTP-handler'ов (admin берётся из JWT.user_id).
+func authFromUserID(userID int64) *pb.Auth {
+	return &pb.Auth{AdminUserId: userID}
+}
+
+// ─── Используется ботом (callback'и) ───────────────────────────────
+
+func (c *BroadcastClient) ApproveBroadcastByTelegramID(ctx context.Context, draftID, adminTGID int64) (*pb.ApproveBroadcastResponse, error) {
 	return c.client.ApproveBroadcast(ctx, &pb.ApproveBroadcastRequest{
-		DraftId:         draftID,
-		AdminTelegramId: adminTelegramID,
+		DraftId: draftID,
+		Auth:    authFromTelegramID(adminTGID),
 	})
 }
 
-// CancelBroadcast — admin click "❌ Cancel #N". Применимо только к
-// status='draft'; после approve cancel игнорируется (FailedPrecondition).
-func (c *BroadcastClient) CancelBroadcast(ctx context.Context, draftID, adminTelegramID int64) (*pb.CancelBroadcastResponse, error) {
+func (c *BroadcastClient) CancelBroadcastByTelegramID(ctx context.Context, draftID, adminTGID int64) (*pb.CancelBroadcastResponse, error) {
 	return c.client.CancelBroadcast(ctx, &pb.CancelBroadcastRequest{
-		DraftId:         draftID,
-		AdminTelegramId: adminTelegramID,
+		DraftId: draftID,
+		Auth:    authFromTelegramID(adminTGID),
+	})
+}
+
+// ─── Используется HTTP-админкой ────────────────────────────────────
+
+func (c *BroadcastClient) ApproveBroadcast(ctx context.Context, draftID, adminUserID int64) (*pb.ApproveBroadcastResponse, error) {
+	return c.client.ApproveBroadcast(ctx, &pb.ApproveBroadcastRequest{
+		DraftId: draftID,
+		Auth:    authFromUserID(adminUserID),
+	})
+}
+
+func (c *BroadcastClient) CancelBroadcast(ctx context.Context, draftID, adminUserID int64) (*pb.CancelBroadcastResponse, error) {
+	return c.client.CancelBroadcast(ctx, &pb.CancelBroadcastRequest{
+		DraftId: draftID,
+		Auth:    authFromUserID(adminUserID),
+	})
+}
+
+func (c *BroadcastClient) ListBroadcasts(
+	ctx context.Context,
+	adminUserID int64,
+	statusFilter, segmentFilter string,
+	limit, offset int32,
+) (*pb.ListBroadcastsResponse, error) {
+	return c.client.ListBroadcasts(ctx, &pb.ListBroadcastsRequest{
+		Auth:          authFromUserID(adminUserID),
+		StatusFilter:  statusFilter,
+		SegmentFilter: segmentFilter,
+		Limit:         limit,
+		Offset:        offset,
+	})
+}
+
+func (c *BroadcastClient) GetBroadcastDetails(ctx context.Context, draftID, adminUserID int64) (*pb.BroadcastDetails, error) {
+	return c.client.GetBroadcastDetails(ctx, &pb.GetBroadcastDetailsRequest{
+		DraftId: draftID,
+		Auth:    authFromUserID(adminUserID),
+	})
+}
+
+func (c *BroadcastClient) UpdateBroadcast(
+	ctx context.Context,
+	draftID, adminUserID int64,
+	title, body string,
+	buttons []*pb.Button, // nil = не менять
+) (*pb.DraftSummary, error) {
+	return c.client.UpdateBroadcast(ctx, &pb.UpdateBroadcastRequest{
+		DraftId:      draftID,
+		Auth:         authFromUserID(adminUserID),
+		Title:        title,
+		BodyTemplate: body,
+		Buttons:      buttons,
 	})
 }

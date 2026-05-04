@@ -265,6 +265,18 @@ func (a *App) Start() error {
 					r.Get("/{id}/stats", adminCampaignsHandler.Stats)
 				})
 			}
+
+			// /admin/broadcasts — управление retention-рассылками
+			// (RetentionCron drafts → admin approve → BroadcastSender).
+			adminBroadcastsHandler := handler.NewAdminBroadcastsHandler(broadcastClient, a.logger)
+			r.Route("/admin/broadcasts", func(r chi.Router) {
+				r.Use(gwmw.RequireAdmin)
+				r.Get("/", adminBroadcastsHandler.List)
+				r.Get("/{id}", adminBroadcastsHandler.Get)
+				r.Patch("/{id}", adminBroadcastsHandler.Update)
+				r.Post("/{id}/approve", adminBroadcastsHandler.Approve)
+				r.Post("/{id}/cancel", adminBroadcastsHandler.Cancel)
+			})
 		})
 	})
 

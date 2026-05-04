@@ -411,7 +411,7 @@ func (h *TelegramBotHandler) handleBroadcastApprove(ctx context.Context, callbac
 		return
 	}
 
-	resp, err := h.broadcastClient.ApproveBroadcast(ctx, draftID, callback.From.ID)
+	resp, err := h.broadcastClient.ApproveBroadcastByTelegramID(ctx, draftID, callback.From.ID)
 	if err != nil {
 		h.logger.Warn("broadcast approve failed",
 			zap.Int64("draft_id", draftID),
@@ -451,7 +451,7 @@ func (h *TelegramBotHandler) handleBroadcastCancel(ctx context.Context, callback
 		return
 	}
 
-	_, err = h.broadcastClient.CancelBroadcast(ctx, draftID, callback.From.ID)
+	_, err = h.broadcastClient.CancelBroadcastByTelegramID(ctx, draftID, callback.From.ID)
 	if err != nil {
 		h.logger.Warn("broadcast cancel failed",
 			zap.Int64("draft_id", draftID),

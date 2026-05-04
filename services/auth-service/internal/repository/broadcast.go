@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -470,6 +471,189 @@ func (r *BroadcastRepository) IsAdmin(ctx context.Context, telegramID int64) (bo
 		return false, 0, fmt.Errorf("lookup admin %d: %w", telegramID, err)
 	}
 	return role == "admin", userID, nil
+}
+
+// IsAdminByUserID — то же что IsAdmin, но по users.id (для HTTP-ручек,
+// где admin берётся из JWT.user_id).
+func (r *BroadcastRepository) IsAdminByUserID(ctx context.Context, userID int64) (bool, error) {
+	var role string
+	var banned bool
+	err := r.db.QueryRow(ctx, `
+		SELECT role, is_banned FROM users WHERE id = $1
+	`, userID).Scan(&role, &banned)
+	if err != nil {
+		return false, fmt.Errorf("lookup admin by user_id %d: %w", userID, err)
+	}
+	return role == "admin" && !banned, nil
+}
+
+// DraftStats — агрегаты broadcast_sends per draft.
+type DraftStats struct {
+	Sent    int32
+	Blocked int32
+	Failed  int32
+	Opened  int32 // sends с opened_at IS NOT NULL
+	Clicked int32 // sends с clicked_at IS NOT NULL
+}
+
+// GetDraftStats считает агрегаты за один SQL-запрос. Если в broadcast_sends
+// нет ни одной строки — возвращает все нули, не ошибку.
+func (r *BroadcastRepository) GetDraftStats(ctx context.Context, draftID int64) (*DraftStats, error) {
+	var s DraftStats
+	err := r.db.QueryRow(ctx, `
+		SELECT
+		  COUNT(*) FILTER (WHERE status = 'sent'),
+		  COUNT(*) FILTER (WHERE status = 'blocked'),
+		  COUNT(*) FILTER (WHERE status = 'failed'),
+		  COUNT(*) FILTER (WHERE opened_at IS NOT NULL),
+		  COUNT(*) FILTER (WHERE clicked_at IS NOT NULL)
+		FROM broadcast_sends
+		WHERE broadcast_id = $1
+	`, draftID).Scan(&s.Sent, &s.Blocked, &s.Failed, &s.Opened, &s.Clicked)
+	if err != nil {
+		return nil, fmt.Errorf("get draft stats %d: %w", draftID, err)
+	}
+	return &s, nil
+}
+
+// ListDrafts — с фильтрами status / segment_key и пагинацией. Используется
+// HTTP-админкой для GET /admin/broadcasts. Пустые фильтры → все. limit=0
+// или >200 кэпится в 50/200.
+func (r *BroadcastRepository) ListDrafts(
+	ctx context.Context,
+	statusFilter, segmentFilter string,
+	limit, offset int32,
+) ([]DraftSummary, int32, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	// Динамические WHERE — но фильтры из enum'а, а не free-text юзерский
+	// ввод. Поэтому конкатенация безопасна; параметризуем для аккуратности.
+	conds := []string{"1 = 1"}
+	args := []any{}
+	idx := 1
+	if statusFilter != "" {
+		conds = append(conds, fmt.Sprintf("status = $%d", idx))
+		args = append(args, statusFilter)
+		idx++
+	}
+	if segmentFilter != "" {
+		conds = append(conds, fmt.Sprintf("segment_key = $%d", idx))
+		args = append(args, segmentFilter)
+		idx++
+	}
+	whereClause := strings.Join(conds, " AND ")
+
+	// 1) Total — без лимита.
+	var total int32
+	err := r.db.QueryRow(ctx,
+		"SELECT COUNT(*) FROM broadcast_drafts WHERE "+whereClause,
+		args...,
+	).Scan(&total)
+	if err != nil {
+		return nil, 0, fmt.Errorf("count drafts: %w", err)
+	}
+
+	// 2) Page.
+	args = append(args, limit, offset)
+	rows, err := r.db.Query(ctx,
+		"SELECT id, segment_key, title, recipient_count, status, created_at, sent_at "+
+			"FROM broadcast_drafts WHERE "+whereClause+
+			" ORDER BY created_at DESC "+
+			fmt.Sprintf("LIMIT $%d OFFSET $%d", idx, idx+1),
+		args...,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list drafts: %w", err)
+	}
+	defer rows.Close()
+
+	var out []DraftSummary
+	for rows.Next() {
+		var d DraftSummary
+		if err := rows.Scan(&d.ID, &d.SegmentKey, &d.Title, &d.RecipientCount,
+			&d.Status, &d.CreatedAt, &d.SentAt); err != nil {
+			return nil, 0, err
+		}
+		out = append(out, d)
+	}
+	return out, total, rows.Err()
+}
+
+// UpdateDraftFieldsInput — частичный апдейт. nil = не менять. Pointers не
+// используем для строк, чтобы proto plain-string поля mapили на пустую
+// строку = "не менять" (см. proto comment). Для buttons: nil = не менять,
+// пустой slice = менять на пустоту.
+type UpdateDraftFieldsInput struct {
+	Title        string         // "" = не менять
+	BodyTemplate string         // "" = не менять
+	Buttons      []ButtonConfig // nil = не менять, [] = очистить
+	ButtonsSet   bool           // явно: true если нужно перезаписать buttons
+}
+
+// UpdateDraftFields правит поля draft'а. Допустимо ТОЛЬКО для status='draft'
+// (после approve recipient_ids snapshot уже зафиксирован, и часть юзеров
+// может уже получить старую версию). Возвращает affected (0 если статус
+// не draft).
+func (r *BroadcastRepository) UpdateDraftFields(
+	ctx context.Context,
+	id int64,
+	in UpdateDraftFieldsInput,
+) (int64, error) {
+	sets := []string{}
+	args := []any{}
+	idx := 1
+	if in.Title != "" {
+		sets = append(sets, fmt.Sprintf("title = $%d", idx))
+		args = append(args, in.Title)
+		idx++
+	}
+	if in.BodyTemplate != "" {
+		sets = append(sets, fmt.Sprintf("body_template = $%d", idx))
+		args = append(args, in.BodyTemplate)
+		idx++
+	}
+	if in.ButtonsSet {
+		btnJSON, err := json.Marshal(in.Buttons)
+		if err != nil {
+			return 0, fmt.Errorf("marshal buttons: %w", err)
+		}
+		if in.Buttons == nil {
+			btnJSON = []byte("[]")
+		}
+		sets = append(sets, fmt.Sprintf("button_config = $%d", idx))
+		args = append(args, btnJSON)
+		idx++
+	}
+	if len(sets) == 0 {
+		// Нечего обновлять — не открываем transaction. Возвращаем 1 (логически
+		// "draft существует и status подходящий"). На самом деле мы это не
+		// проверяем без UPDATE; чтобы не давать ложного успеха, выполним
+		// noop UPDATE с условием по статусу.
+		tag, err := r.db.Exec(ctx, `
+			UPDATE broadcast_drafts SET title = title
+			WHERE id = $1 AND status = 'draft'
+		`, id)
+		if err != nil {
+			return 0, fmt.Errorf("noop update draft: %w", err)
+		}
+		return tag.RowsAffected(), nil
+	}
+	args = append(args, id)
+	q := "UPDATE broadcast_drafts SET " + strings.Join(sets, ", ") +
+		fmt.Sprintf(" WHERE id = $%d AND status = 'draft'", idx)
+	tag, err := r.db.Exec(ctx, q, args...)
+	if err != nil {
+		return 0, fmt.Errorf("update draft fields %d: %w", id, err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // ListPendingDrafts возвращает drafts в status='draft' или 'approved',

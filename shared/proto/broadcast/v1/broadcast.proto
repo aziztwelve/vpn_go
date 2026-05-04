@@ -10,19 +10,19 @@ option go_package = "github.com/vpn/shared/pkg/proto/broadcast/v1";
 // После approve запускается BroadcastSender — рассылает с rate-limit
 // 25 msg/s, пишет broadcast_sends per recipient.
 //
-// Все методы — admin-only:
-//   - admin_telegram_id передаётся gateway'ем из CallbackQuery.From.ID.
-//   - auth-service сам проверяет users.role='admin' для этого tg_id.
-//     Возвращает PermissionDenied если не админ.
+// Все методы — admin-only. Для авторизации передаётся ровно один из:
+//   - admin_telegram_id — когда вызов идёт из Telegram-callback'а (gateway
+//     парсит CallbackQuery.From.ID).
+//   - admin_user_id — когда вызов идёт из HTTP-ручки админки (gateway
+//     берёт user_id из JWT).
+// auth-service сверяет указанный идентификатор с users.role='admin' и
+// возвращает PermissionDenied если не админ.
 //
 // Сервис хостится в одном процессе с AuthService (auth-service бинарник),
-// потому что broadcast-таблицы и users живут в той же БД и одной транзакции.
+// потому что broadcast-таблицы и users живут в той же БД.
 service BroadcastService {
   // ApproveBroadcast — переводит draft в status='approved', запускает
-  // BroadcastSender в фоне. Возвращает СРАЗУ (до окончания рассылки),
-  // чтобы Telegram callback не таймаутил. Реальный итог — в логе и в
-  // повторном notify админам когда отправка закончится.
-  //
+  // BroadcastSender в фоне. Возвращает СРАЗУ (до окончания рассылки).
   // Идемпотентность: повторный approve уже approved/sending/sent draft'а
   // вернёт FailedPrecondition.
   rpc ApproveBroadcast(ApproveBroadcastRequest) returns (ApproveBroadcastResponse);
@@ -31,28 +31,55 @@ service BroadcastService {
   // только к status='draft'. После 'approved' уже поздно (sender запущен).
   rpc CancelBroadcast(CancelBroadcastRequest) returns (CancelBroadcastResponse);
 
-  // GetDraftSummary — мета-инфо для preview в боте (когда админ кликнул
-  // approve, и мы хотим показать ему ещё раз что именно отправляем).
-  // Опционально — Stage 5 territory; здесь оставлено для полноты API.
+  // GetDraftSummary — мета-инфо для preview (используется в боте Stage 5
+  // и админкой как лёгкий запрос без stats).
   rpc GetDraftSummary(GetDraftSummaryRequest) returns (DraftSummary);
+
+  // ListBroadcasts — список drafts/approved/sending/sent с пагинацией.
+  // status_filter='' возвращает все. limit=0 → 50 default.
+  rpc ListBroadcasts(ListBroadcastsRequest) returns (ListBroadcastsResponse);
+
+  // GetBroadcastDetails — полные данные draft'а (включая body_template +
+  // recipient_count) + агрегаты по broadcast_sends (sent/blocked/failed/
+  // opened/clicked).
+  rpc GetBroadcastDetails(GetBroadcastDetailsRequest) returns (BroadcastDetails);
+
+  // UpdateBroadcast — отредактировать title/body/buttons. Применимо ТОЛЬКО
+  // к status='draft' (после approve поздно — recipient_ids snapshot уже
+  // зафиксирован, и часть юзеров может уже получить старую версию).
+  // Пустые поля в запросе означают "не менять"; для очистки notes
+  // передавать пробел или явно "" — сейчас всё равно перезаписываем.
+  rpc UpdateBroadcast(UpdateBroadcastRequest) returns (DraftSummary);
 }
+
+// ─── Authorization Helper ──────────────────────────────────────────
+// Вынесено как сообщение-помощник, чтобы не дублировать поля во всех
+// запросах. Каждый запрос вкладывает Auth.
+
+message Auth {
+  // Ровно одно из полей должно быть != 0:
+  //   - admin_telegram_id — для callback'ов бота
+  //   - admin_user_id — для HTTP-ручек (берётся из JWT)
+  int64 admin_telegram_id = 1;
+  int64 admin_user_id = 2;
+}
+
+// ─── Approve / Cancel / GetSummary ──────────────────────────────────
 
 message ApproveBroadcastRequest {
   int64 draft_id = 1;
-  // Telegram-id юзера, нажавшего approve (для проверки role='admin'
-  // и записи в broadcast_drafts.approved_by).
-  int64 admin_telegram_id = 2;
+  Auth auth = 2;
 }
 
 message ApproveBroadcastResponse {
   int64 draft_id = 1;
   string status = 2;          // 'approved' если успех
-  int32 recipient_count = 3;  // сколько в очередь поставлено (для UI)
+  int32 recipient_count = 3;  // сколько в очередь поставлено
 }
 
 message CancelBroadcastRequest {
   int64 draft_id = 1;
-  int64 admin_telegram_id = 2;
+  Auth auth = 2;
 }
 
 message CancelBroadcastResponse {
@@ -62,7 +89,80 @@ message CancelBroadcastResponse {
 
 message GetDraftSummaryRequest {
   int64 draft_id = 1;
-  int64 admin_telegram_id = 2;
+  Auth auth = 2;
+}
+
+// ─── List ──────────────────────────────────────────────────────────
+
+message ListBroadcastsRequest {
+  Auth auth = 1;
+  // Фильтры. Пустой status_filter → все. Пустой segment_filter → все.
+  string status_filter = 2;   // '' | 'draft' | 'approved' | 'sending' | 'sent' | 'cancelled'
+  string segment_filter = 3;  // '' | 'trial_never_connected' | 'trial_ending_idle' | ...
+  int32 limit = 4;            // 0 → 50 default, max 200
+  int32 offset = 5;
+}
+
+message ListBroadcastsResponse {
+  repeated DraftSummary items = 1;
+  int32 total = 2;
+}
+
+// ─── GetDetails ────────────────────────────────────────────────────
+
+message GetBroadcastDetailsRequest {
+  int64 draft_id = 1;
+  Auth auth = 2;
+}
+
+message BroadcastDetails {
+  // ── метаданные draft'а (всё кроме recipient_ids — он может быть
+  //    тысячи строк, отдаём только count; для полного списка отдельный
+  //    GetRecipients endpoint, если понадобится).
+  int64 id = 1;
+  string segment_key = 2;
+  string title = 3;
+  string body_template = 4;
+  repeated Button buttons = 5;
+  int32 recipient_count = 6;
+  string status = 7;
+  int64 created_at_unix = 8;
+  int64 approved_at_unix = 9;  // 0 если не approved
+  int64 approved_by_user_id = 10;
+  int64 sent_at_unix = 11;     // 0 если не sent
+
+  // ── агрегаты broadcast_sends.
+  Stats stats = 20;
+}
+
+message Button {
+  string text = 1;
+  string type = 2;       // 'web_app' | 'url' | 'callback_data'
+  string url = 3;
+  string data = 4;       // для callback_data
+}
+
+message Stats {
+  int32 sent = 1;
+  int32 blocked = 2;
+  int32 failed = 3;
+  int32 opened = 4;      // юзеров кто открыл MiniApp с ?ref=broadcast_<id>
+  int32 clicked = 5;     // юзеров кто кликнул CTA
+}
+
+// ─── Update ────────────────────────────────────────────────────────
+
+message UpdateBroadcastRequest {
+  int64 draft_id = 1;
+  Auth auth = 2;
+
+  // Опциональные поля. Передавать только те, что меняем.
+  // Для не-меняющихся не передавать вообще — серверная логика
+  // сравнивает с пустотой (для buttons — пустой массив = не менять;
+  // для очистки кнопок передать [{"text":"none"}] или удалить draft).
+  string title = 3;            // "" = не менять
+  string body_template = 4;    // "" = не менять
+  repeated Button buttons = 5; // nil = не менять, [] = очистить (но тогда без CTA — не делайте)
 }
 
 message DraftSummary {
@@ -71,6 +171,6 @@ message DraftSummary {
   string title = 3;
   int32 recipient_count = 4;
   string status = 5;
-  int64 created_at_unix = 6;  // Unix seconds; сериализация Timestamp избыточна для ad-hoc preview.
-  int64 sent_at_unix = 7;     // 0 если ещё не отправлен
+  int64 created_at_unix = 6;
+  int64 sent_at_unix = 7;
 }
