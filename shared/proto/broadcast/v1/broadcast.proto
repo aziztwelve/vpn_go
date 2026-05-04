@@ -1,0 +1,76 @@
+syntax = "proto3";
+
+package broadcast.v1;
+
+option go_package = "github.com/vpn/shared/pkg/proto/broadcast/v1";
+
+// BroadcastService — управление retention-рассылками.
+//
+// Drafts создаются RetentionCron'ом ежедневно (см. service/retention_cron.go).
+// После approve запускается BroadcastSender — рассылает с rate-limit
+// 25 msg/s, пишет broadcast_sends per recipient.
+//
+// Все методы — admin-only:
+//   - admin_telegram_id передаётся gateway'ем из CallbackQuery.From.ID.
+//   - auth-service сам проверяет users.role='admin' для этого tg_id.
+//     Возвращает PermissionDenied если не админ.
+//
+// Сервис хостится в одном процессе с AuthService (auth-service бинарник),
+// потому что broadcast-таблицы и users живут в той же БД и одной транзакции.
+service BroadcastService {
+  // ApproveBroadcast — переводит draft в status='approved', запускает
+  // BroadcastSender в фоне. Возвращает СРАЗУ (до окончания рассылки),
+  // чтобы Telegram callback не таймаутил. Реальный итог — в логе и в
+  // повторном notify админам когда отправка закончится.
+  //
+  // Идемпотентность: повторный approve уже approved/sending/sent draft'а
+  // вернёт FailedPrecondition.
+  rpc ApproveBroadcast(ApproveBroadcastRequest) returns (ApproveBroadcastResponse);
+
+  // CancelBroadcast — переводит draft в status='cancelled'. Применимо
+  // только к status='draft'. После 'approved' уже поздно (sender запущен).
+  rpc CancelBroadcast(CancelBroadcastRequest) returns (CancelBroadcastResponse);
+
+  // GetDraftSummary — мета-инфо для preview в боте (когда админ кликнул
+  // approve, и мы хотим показать ему ещё раз что именно отправляем).
+  // Опционально — Stage 5 territory; здесь оставлено для полноты API.
+  rpc GetDraftSummary(GetDraftSummaryRequest) returns (DraftSummary);
+}
+
+message ApproveBroadcastRequest {
+  int64 draft_id = 1;
+  // Telegram-id юзера, нажавшего approve (для проверки role='admin'
+  // и записи в broadcast_drafts.approved_by).
+  int64 admin_telegram_id = 2;
+}
+
+message ApproveBroadcastResponse {
+  int64 draft_id = 1;
+  string status = 2;          // 'approved' если успех
+  int32 recipient_count = 3;  // сколько в очередь поставлено (для UI)
+}
+
+message CancelBroadcastRequest {
+  int64 draft_id = 1;
+  int64 admin_telegram_id = 2;
+}
+
+message CancelBroadcastResponse {
+  int64 draft_id = 1;
+  string status = 2;          // 'cancelled' если успех
+}
+
+message GetDraftSummaryRequest {
+  int64 draft_id = 1;
+  int64 admin_telegram_id = 2;
+}
+
+message DraftSummary {
+  int64 id = 1;
+  string segment_key = 2;
+  string title = 3;
+  int32 recipient_count = 4;
+  string status = 5;
+  int64 created_at_unix = 6;  // Unix seconds; сериализация Timestamp избыточна для ad-hoc preview.
+  int64 sent_at_unix = 7;     // 0 если ещё не отправлен
+}

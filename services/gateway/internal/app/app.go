@@ -155,9 +155,12 @@ func (a *App) Start() error {
 	subscriptionConfigHandler := handler.NewSubscriptionConfigHandler(a.vpnClient, a.config.Subscription.DefaultCountry, a.logger)
 	bonusHandler := handler.NewBonusHandler(a.subscriptionClient, a.logger, a.config.Telegram.BotToken, a.config.Telegram.ChannelUsername)
 
-	// Telegram Bot Handler для команд и callback'ов
+	// Telegram Bot Handler для команд и callback'ов.
+	// broadcastClient переиспользует grpc-conn от authClient'а
+	// (BroadcastService живёт в auth-service бинарнике).
 	telegramClient := telegram.New(a.config.Telegram.BotToken)
-	telegramBotHandler := handler.NewTelegramBotHandler(telegramClient, a.subscriptionClient, a.authClient, a.logger, a.config.Telegram.ChannelUsername)
+	broadcastClient := client.NewBroadcastClient(a.authClient.Conn(), a.logger)
+	telegramBotHandler := handler.NewTelegramBotHandler(telegramClient, a.subscriptionClient, a.authClient, broadcastClient, a.logger, a.config.Telegram.ChannelUsername)
 
 	// JWT middleware для защищённых ручек. Секрет — общий с Auth Service.
 	jwtMiddleware := authmw.JWTMiddleware(a.config.JWT.Secret)

@@ -24,11 +24,14 @@ const refStartParamPrefix = "ref_"
 // Атрибуция к кампании — независима от реферальной программы (ref_).
 const srcStartParamPrefix = "src_"
 
-// TelegramBotHandler обрабатывает команды и callback'и от Telegram бота
+// TelegramBotHandler обрабатывает команды и callback'и от Telegram бота.
+// broadcastClient может быть nil — тогда retention-callback'и (bc_*) будут
+// игнорироваться (полезно для dev окружений без auth-service'а).
 type TelegramBotHandler struct {
 	telegramClient     *telegram.Client
 	subscriptionClient *client.SubscriptionClient
 	authClient         *client.AuthClient
+	broadcastClient    *client.BroadcastClient
 	logger             *zap.Logger
 	channelUsername    string
 }
@@ -37,6 +40,7 @@ func NewTelegramBotHandler(
 	telegramClient *telegram.Client,
 	subscriptionClient *client.SubscriptionClient,
 	authClient *client.AuthClient,
+	broadcastClient *client.BroadcastClient,
 	logger *zap.Logger,
 	channelUsername string,
 ) *TelegramBotHandler {
@@ -44,6 +48,7 @@ func NewTelegramBotHandler(
 		telegramClient:     telegramClient,
 		subscriptionClient: subscriptionClient,
 		authClient:         authClient,
+		broadcastClient:    broadcastClient,
 		logger:             logger,
 		channelUsername:    channelUsername,
 	}
@@ -282,18 +287,32 @@ func (h *TelegramBotHandler) sendBonusMessage(ctx context.Context, chatID int64)
 	}
 }
 
-// handleCallback обрабатывает callback'и от inline кнопок
-func (h *TelegramBotHandler) handleCallback(ctx context.Context, callback *CallbackQuery) {
-	// Сначала отвечаем на callback (убираем loader)
-	defer func() {
-		_ = h.telegramClient.AnswerCallbackQuery(ctx, telegram.AnswerCallbackQueryParams{
-			CallbackQueryID: callback.ID,
-		})
-	}()
+// bcCallbackPrefixApprove / bcCallbackPrefixCancel — callback_data префиксы
+// для retention-broadcast inline-кнопок (см. service/retention_cron.go в
+// auth-service). Формат: bc_approve_<id> / bc_cancel_<id>.
+const (
+	bcCallbackPrefixApprove = "bc_approve_"
+	bcCallbackPrefixCancel  = "bc_cancel_"
+)
 
-	switch callback.Data {
-	case "claim_bonus":
+// handleCallback обрабатывает callback'и от inline кнопок.
+//
+// Каждый callback требует AnswerCallbackQuery (иначе у юзера крутится
+// loader). Конкретные хендлеры сами вызывают answerCallback — так можно
+// показывать alert/text. Если хендлер не найден — отвечаем пустым.
+func (h *TelegramBotHandler) handleCallback(ctx context.Context, callback *CallbackQuery) {
+	switch {
+	case callback.Data == "claim_bonus":
 		h.handleClaimBonus(ctx, callback)
+	case strings.HasPrefix(callback.Data, bcCallbackPrefixApprove):
+		h.handleBroadcastApprove(ctx, callback,
+			strings.TrimPrefix(callback.Data, bcCallbackPrefixApprove))
+	case strings.HasPrefix(callback.Data, bcCallbackPrefixCancel):
+		h.handleBroadcastCancel(ctx, callback,
+			strings.TrimPrefix(callback.Data, bcCallbackPrefixCancel))
+	default:
+		// Неизвестный callback — закрываем loader, чтобы не висел.
+		h.answerCallback(ctx, callback.ID, "", false)
 	}
 }
 
@@ -374,6 +393,109 @@ func (h *TelegramBotHandler) answerCallback(ctx context.Context, callbackID, tex
 		Text:            text,
 		ShowAlert:       showAlert,
 	})
+}
+
+// handleBroadcastApprove — обработчик callback'а "✅ Approve #N" под превью
+// retention-рассылки. Вызывает auth-service BroadcastService.ApproveBroadcast,
+// который проверяет admin-роль и стартует sender в фоне.
+//
+// idStr — суффикс после "bc_approve_". Парсим в int64.
+func (h *TelegramBotHandler) handleBroadcastApprove(ctx context.Context, callback *CallbackQuery, idStr string) {
+	if h.broadcastClient == nil {
+		h.answerCallback(ctx, callback.ID, "❌ Broadcast-клиент не настроен", true)
+		return
+	}
+	draftID, err := parseInt64(idStr)
+	if err != nil || draftID <= 0 {
+		h.answerCallback(ctx, callback.ID, "❌ Некорректный ID draft'а", true)
+		return
+	}
+
+	resp, err := h.broadcastClient.ApproveBroadcast(ctx, draftID, callback.From.ID)
+	if err != nil {
+		h.logger.Warn("broadcast approve failed",
+			zap.Int64("draft_id", draftID),
+			zap.Int64("admin_tg_id", callback.From.ID),
+			zap.Error(err),
+		)
+		h.answerCallback(ctx, callback.ID,
+			fmt.Sprintf("❌ Ошибка: %s", briefGRPCError(err)), true)
+		return
+	}
+
+	h.logger.Info("broadcast approved",
+		zap.Int64("draft_id", draftID),
+		zap.Int64("admin_tg_id", callback.From.ID),
+		zap.Int32("recipients", resp.RecipientCount),
+	)
+
+	// Заменяем preview-message на статусную плашку, чтобы кнопки исчезли.
+	if callback.Message != nil {
+		newText := fmt.Sprintf("✅ Approved (#%d) — рассылка %d юзерам запущена.\n"+
+			"Итог придёт отдельным сообщением через несколько секунд.",
+			draftID, resp.RecipientCount)
+		h.editMessage(ctx, callback.Message.Chat.ID, callback.Message.MessageID, newText)
+	}
+	h.answerCallback(ctx, callback.ID, "✅ Запущено", false)
+}
+
+// handleBroadcastCancel — обработчик "❌ Cancel #N". Меняет status='cancelled'.
+func (h *TelegramBotHandler) handleBroadcastCancel(ctx context.Context, callback *CallbackQuery, idStr string) {
+	if h.broadcastClient == nil {
+		h.answerCallback(ctx, callback.ID, "❌ Broadcast-клиент не настроен", true)
+		return
+	}
+	draftID, err := parseInt64(idStr)
+	if err != nil || draftID <= 0 {
+		h.answerCallback(ctx, callback.ID, "❌ Некорректный ID draft'а", true)
+		return
+	}
+
+	_, err = h.broadcastClient.CancelBroadcast(ctx, draftID, callback.From.ID)
+	if err != nil {
+		h.logger.Warn("broadcast cancel failed",
+			zap.Int64("draft_id", draftID),
+			zap.Int64("admin_tg_id", callback.From.ID),
+			zap.Error(err),
+		)
+		h.answerCallback(ctx, callback.ID,
+			fmt.Sprintf("❌ Ошибка: %s", briefGRPCError(err)), true)
+		return
+	}
+
+	h.logger.Info("broadcast cancelled",
+		zap.Int64("draft_id", draftID),
+		zap.Int64("admin_tg_id", callback.From.ID),
+	)
+
+	if callback.Message != nil {
+		newText := fmt.Sprintf("❌ Cancelled (#%d) — рассылка отменена.", draftID)
+		h.editMessage(ctx, callback.Message.Chat.ID, callback.Message.MessageID, newText)
+	}
+	h.answerCallback(ctx, callback.ID, "Отменено", false)
+}
+
+// parseInt64 — strconv.ParseInt одной строкой; завёрнут чтобы не ломать
+// импорт-блок strconv (в этом файле его пока нет, и это единственное
+// место где он понадобился).
+func parseInt64(s string) (int64, error) {
+	var n int64
+	_, err := fmt.Sscanf(s, "%d", &n)
+	return n, err
+}
+
+// briefGRPCError — короткое описание для Telegram alert (без RPC-внутренностей).
+// gRPC ошибки вида "rpc error: code = PermissionDenied desc = admin role required"
+// человеку показывать не стоит — режем до desc'а.
+func briefGRPCError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	if i := strings.Index(msg, "desc = "); i != -1 {
+		return msg[i+len("desc = "):]
+	}
+	return msg
 }
 
 // editMessage редактирует текст сообщения

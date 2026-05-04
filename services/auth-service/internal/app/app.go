@@ -14,6 +14,7 @@ import (
 	grpchealth "github.com/vpn/platform/pkg/grpc/health"
 	"github.com/vpn/platform/pkg/telegram"
 	pb "github.com/vpn/shared/pkg/proto/auth/v1"
+	broadcastpb "github.com/vpn/shared/pkg/proto/broadcast/v1"
 	referralpb "github.com/vpn/shared/pkg/proto/referral/v1"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -34,6 +35,13 @@ type App struct {
 	// RETENTION_CRON_ENABLED=false. Run запускается в Start() в goroutine,
 	// останавливается через closer (cancellation context).
 	retentionCron *service.RetentionCron
+
+	// Общие зависимости broadcast-стека: используются и RetentionCron'ом
+	// (для генерации drafts + admin notify), и BroadcastSender'ом (для
+	// approve-flow + рассылки), и BroadcastAPI (gRPC).
+	broadcastRepo   *repository.BroadcastRepository
+	broadcastSender *service.BroadcastSender
+	tgClient        *telegram.Client
 }
 
 func New(logger *zap.Logger) (*App, error) {
@@ -57,6 +65,12 @@ func New(logger *zap.Logger) (*App, error) {
 		return nil, fmt.Errorf("failed to init database: %w", err)
 	}
 
+	// Конструируем broadcast-стек до gRPC и cron'а: они оба ссылаются
+	// на общие repo/sender/tgClient.
+	app.tgClient = telegram.New(app.config.Telegram.BotToken)
+	app.broadcastRepo = repository.NewBroadcastRepository(app.db)
+	app.broadcastSender = service.NewBroadcastSender(app.broadcastRepo, app.tgClient, app.logger)
+
 	// Initialize gRPC server
 	if err := app.initGRPC(); err != nil {
 		return nil, fmt.Errorf("failed to init gRPC: %w", err)
@@ -78,11 +92,9 @@ func (a *App) initRetentionCron() error {
 		a.logger.Info("Retention cron disabled (RETENTION_CRON_ENABLED=false)")
 		return nil
 	}
-	tgClient := telegram.New(a.config.Telegram.BotToken)
-	broadcastRepo := repository.NewBroadcastRepository(a.db)
 	a.retentionCron = service.NewRetentionCron(
-		broadcastRepo,
-		tgClient,
+		a.broadcastRepo,
+		a.tgClient,
 		service.RetentionCronConfig{
 			Enabled:         a.config.Retention.Enabled,
 			RunAtUTC:        a.config.Retention.RunAtUTC,
@@ -157,10 +169,12 @@ func (a *App) initGRPC() error {
 
 	// Create API
 	authAPI := api.NewAuthAPI(authService, a.logger)
+	broadcastAPI := api.NewBroadcastAPI(a.broadcastRepo, a.broadcastSender, a.logger)
 
 	// Create gRPC server
 	a.grpcServer = grpc.NewServer()
 	pb.RegisterAuthServiceServer(a.grpcServer, authAPI)
+	broadcastpb.RegisterBroadcastServiceServer(a.grpcServer, broadcastAPI)
 	reflection.Register(a.grpcServer)
 
 	// gRPC Health (gRPC Health v1) — пинг БД для readiness-проверки.

@@ -307,6 +307,171 @@ type DraftSummary struct {
 	SentAt         *time.Time
 }
 
+// Draft — полные данные draft'а для sender'а.
+type Draft struct {
+	ID             int64
+	SegmentKey     string
+	Title          string
+	BodyTemplate   string
+	ButtonConfig   []ButtonConfig
+	RecipientIDs   []int64
+	RecipientCount int
+	Status         string
+	CreatedAt      time.Time
+	ApprovedAt     *time.Time
+	ApprovedBy     *int64
+	SentAt         *time.Time
+}
+
+// GetDraft читает draft со всеми полями. Используется sender'ом для
+// итерации по recipient_ids и рендеринга шаблона.
+func (r *BroadcastRepository) GetDraft(ctx context.Context, id int64) (*Draft, error) {
+	var d Draft
+	var btnRaw []byte
+	err := r.db.QueryRow(ctx, `
+		SELECT id, segment_key, title, body_template, button_config,
+		       recipient_ids, recipient_count, status, created_at,
+		       approved_at, approved_by, sent_at
+		FROM broadcast_drafts WHERE id = $1
+	`, id).Scan(
+		&d.ID, &d.SegmentKey, &d.Title, &d.BodyTemplate, &btnRaw,
+		&d.RecipientIDs, &d.RecipientCount, &d.Status, &d.CreatedAt,
+		&d.ApprovedAt, &d.ApprovedBy, &d.SentAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get draft %d: %w", id, err)
+	}
+	if len(btnRaw) > 0 {
+		if err := json.Unmarshal(btnRaw, &d.ButtonConfig); err != nil {
+			return nil, fmt.Errorf("unmarshal buttons: %w", err)
+		}
+	}
+	return &d, nil
+}
+
+// UpdateDraftStatus переводит draft в новый статус. approvedByUserID
+// проставляется только при переходе в 'approved' — для остальных передаётся 0.
+//
+// Возвращает affected — фактическое число обновлённых строк (0 если
+// статус не подошёл и UPDATE отфильтровался). Используется как
+// идемпотентный предикат: если 0 — значит draft уже не в expectedFromStatus.
+func (r *BroadcastRepository) UpdateDraftStatus(
+	ctx context.Context,
+	id int64,
+	expectedFromStatus, newStatus string,
+	approvedByUserID int64,
+) (int64, error) {
+	var query string
+	var args []any
+	switch newStatus {
+	case "approved":
+		query = `
+			UPDATE broadcast_drafts
+			SET status = $1, approved_at = NOW(), approved_by = $2
+			WHERE id = $3 AND status = $4
+		`
+		args = []any{newStatus, approvedByUserID, id, expectedFromStatus}
+	case "sent":
+		query = `
+			UPDATE broadcast_drafts
+			SET status = $1, sent_at = NOW()
+			WHERE id = $2 AND status = $3
+		`
+		args = []any{newStatus, id, expectedFromStatus}
+	default:
+		query = `
+			UPDATE broadcast_drafts
+			SET status = $1
+			WHERE id = $2 AND status = $3
+		`
+		args = []any{newStatus, id, expectedFromStatus}
+	}
+	tag, err := r.db.Exec(ctx, query, args...)
+	if err != nil {
+		return 0, fmt.Errorf("update draft status %d → %s: %w", id, newStatus, err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// SendInput — одна строка лога доставки.
+type SendInput struct {
+	BroadcastID       int64
+	UserID            int64
+	TelegramMessageID *int64
+	Status            string // pending | sent | blocked | failed
+	ErrorCode         *int32
+	ErrorMessage      string
+}
+
+// InsertSend пишет одну строку в broadcast_sends. Конфликты по UNIQUE
+// (broadcast_id, user_id) НЕ обрабатываем — sender не должен отправлять
+// дважды одному юзеру в рамках одной рассылки.
+func (r *BroadcastRepository) InsertSend(ctx context.Context, in SendInput) error {
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO broadcast_sends
+		  (broadcast_id, user_id, telegram_message_id, status,
+		   error_code, error_message, sent_at)
+		VALUES ($1, $2, $3, $4, $5, $6, NOW())
+	`,
+		in.BroadcastID, in.UserID, in.TelegramMessageID, in.Status,
+		in.ErrorCode, nullableStr(in.ErrorMessage),
+	)
+	if err != nil {
+		return fmt.Errorf("insert send: %w", err)
+	}
+	return nil
+}
+
+// nullableStr — для error_message: пусто → NULL, не пустая строка → значение.
+// Чтобы в БД не было \"\" вместо NULL (фильтрация EXISTS error_message легче).
+func nullableStr(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// UserForSend — данные юзера для рассылки: telegram_id для send + метаданные
+// для рендера шаблона.
+type UserForSend struct {
+	ID         int64
+	TelegramID int64
+	Username   string
+	FirstName  string
+	IsBanned   bool
+}
+
+// GetUserForSend читает данные одного юзера. nil если не найден или забанен
+// (sender просто пропускает таких — записывает в broadcast_sends со
+// status='failed', error='user banned/missing').
+func (r *BroadcastRepository) GetUserForSend(ctx context.Context, userID int64) (*UserForSend, error) {
+	var u UserForSend
+	err := r.db.QueryRow(ctx, `
+		SELECT id, telegram_id, COALESCE(username, ''),
+		       COALESCE(first_name, ''), is_banned
+		FROM users WHERE id = $1
+	`, userID).Scan(&u.ID, &u.TelegramID, &u.Username, &u.FirstName, &u.IsBanned)
+	if err != nil {
+		return nil, fmt.Errorf("get user %d: %w", userID, err)
+	}
+	return &u, nil
+}
+
+// IsAdmin проверяет роль по telegram_id. Используется api/broadcast.go
+// чтобы заблочить approve/cancel от не-админов (защита от inject через
+// callback_data forge).
+func (r *BroadcastRepository) IsAdmin(ctx context.Context, telegramID int64) (bool, int64, error) {
+	var userID int64
+	var role string
+	err := r.db.QueryRow(ctx, `
+		SELECT id, role FROM users WHERE telegram_id = $1 AND is_banned = FALSE
+	`, telegramID).Scan(&userID, &role)
+	if err != nil {
+		return false, 0, fmt.Errorf("lookup admin %d: %w", telegramID, err)
+	}
+	return role == "admin", userID, nil
+}
+
 // ListPendingDrafts возвращает drafts в status='draft' или 'approved',
 // ещё не отправленные. Stage 5 (/admin команда) будет показывать этот
 // список.
