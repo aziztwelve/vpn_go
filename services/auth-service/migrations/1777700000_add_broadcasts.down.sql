@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS broadcast_sends CASCADE;
+DROP TABLE IF EXISTS broadcast_drafts CASCADE;

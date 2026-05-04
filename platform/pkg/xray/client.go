@@ -162,3 +162,43 @@ func (c *Client) GetUserStats(ctx context.Context, email string, reset bool) (Us
 	}
 	return out, nil
 }
+
+// QueryAllUserStats возвращает счётчики трафика ВСЕХ юзеров одним RPC —
+// batch-версия GetUserStats. Вместо per-email обращений делает один
+// QueryStats с pattern="user>>>" (префикс) и группирует ответ по email.
+//
+// Используется TrafficCron'ом: 1 RPC на сервер за тик вместо N*2 RPC.
+// При reset=true — счётчики всех юзеров обнуляются атомарно в xray.
+//
+// Ключ в возвращаемой map — email (то самое значение, что передавалось в
+// AddUser; у нас это "user{vpn_user_id}@vpn.local"). Юзеры без трафика
+// в выдаче отсутствуют вовсе (их нет в stats map xray) — для них
+// итоговая запись просто не создаётся.
+func (c *Client) QueryAllUserStats(ctx context.Context, reset bool) (map[string]UserStats, error) {
+	resp, err := c.stats.QueryStats(ctx, &statscmd.QueryStatsRequest{
+		Pattern: "user>>>",
+		Reset_:  reset,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("xray QueryStats(bulk): %w", err)
+	}
+
+	out := make(map[string]UserStats, len(resp.GetStat())/2+4)
+	for _, s := range resp.GetStat() {
+		// Имя вида "user>>>email>>>traffic>>>{uplink|downlink}"
+		parts := strings.SplitN(s.Name, ">>>", 4)
+		if len(parts) != 4 || parts[0] != "user" || parts[2] != "traffic" {
+			continue
+		}
+		email := parts[1]
+		st := out[email]
+		switch parts[3] {
+		case "uplink":
+			st.Uplink = s.Value
+		case "downlink":
+			st.Downlink = s.Value
+		}
+		out[email] = st
+	}
+	return out, nil
+}

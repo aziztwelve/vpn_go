@@ -14,12 +14,13 @@ const LoadCronInterval = 60 * time.Second
 
 // LoadCron — фоновый обновлятель vpn_servers.load_percent.
 //
-// Формула: load_percent = COUNT(active_connections WHERE server_id AND
+// Формула: load_percent = COUNT(subscription_fetches WHERE server_id AND
 //   last_seen > NOW() - 5min) * 100 / server_max_connections, clamped в [0..100]
 //
-// Источник активности: active_connections.last_seen, который обновляется
-// Heartbeat'ом (Этап 3) на основе Xray Stats API. Т.е. load отражает
-// реально гонящий трафик, а не просто открытые записи.
+// Источник активности: subscription_fetches.last_seen (бывш. active_connections).
+// Обновляется при fetch subscription URL клиентом и в legacy GetVLESSLink
+// per-server path. Для ТОЧНОГО показателя real-load надо суммировать
+// traffic_samples по server_id — TODO если понадобится в UI.
 type LoadCron struct {
 	repo *repository.VPNRepository
 	log  *zap.Logger

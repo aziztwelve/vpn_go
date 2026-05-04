@@ -127,15 +127,22 @@ func (r *VPNRepository) UpsertServerByHostPort(ctx context.Context, s *model.VPN
 }
 
 // UpdateServerLoad пересчитывает load_percent для одного сервера.
-// Формула: load_percent = COUNT(active_connections WHERE server_id AND last_seen > NOW()-5min) * 100 / server_max_connections
+// Формула: load_percent = COUNT(subscription_fetches WHERE server_id AND last_seen > NOW()-5min) * 100 / server_max_connections
+//
+// Таблица переименована из active_connections в subscription_fetches
+// миграцией 007. Этот счётчик отражает number of fresh subscription
+// URL fetches per сервер (только legacy GetVLESSLink path выставляет
+// server_id). Для точной метрики "real user load" нужно суммировать
+// traffic_samples — но для UI-показателя сервер-балансировки этого
+// приближения достаточно.
 func (r *VPNRepository) UpdateServerLoad(ctx context.Context, serverID int32) error {
 	const q = `
 		UPDATE vpn_servers vs
 		SET load_percent = LEAST(100, GREATEST(0, (
 			SELECT COALESCE(COUNT(*) * 100 / NULLIF(vs.server_max_connections, 0), 0)::int
-			FROM active_connections ac
-			WHERE ac.server_id = vs.id
-			  AND ac.last_seen > NOW() - INTERVAL '5 minutes'
+			FROM subscription_fetches sf
+			WHERE sf.server_id = vs.id
+			  AND sf.last_seen > NOW() - INTERVAL '5 minutes'
 		)))
 		WHERE vs.id = $1
 	`
@@ -299,13 +306,14 @@ func (r *VPNRepository) GetSubscriptionMaxDevices(ctx context.Context, vpnUserID
 	return maxDevices, nil
 }
 
-// Active Connections
+// Subscription Fetches (historically known as "active connections" —
+// см. model.ActiveConnection для подробностей о нейминге)
 
 // CountActiveDevices — сколько устройств юзера с last_seen ещё свежий.
 // window — насколько давно должно быть last_seen чтобы считать устройство живым.
 func (r *VPNRepository) CountActiveDevices(ctx context.Context, vpnUserID int64, window time.Duration) (int32, error) {
 	query := `
-		SELECT COUNT(*) FROM active_connections
+		SELECT COUNT(*) FROM subscription_fetches
 		WHERE vpn_user_id = $1 AND last_seen > NOW() - ($2::text)::interval
 	`
 	var count int32
@@ -326,7 +334,7 @@ func (r *VPNRepository) CountActiveDevices(ctx context.Context, vpnUserID int64,
 // fetch'а (без конкретного сервера) есть UpsertDeviceTouch ниже.
 func (r *VPNRepository) UpsertActiveConnection(ctx context.Context, vpnUserID int64, serverID int32, deviceIdentifier string) (*model.ActiveConnection, error) {
 	query := `
-		INSERT INTO active_connections (vpn_user_id, server_id, device_identifier, connected_at, last_seen)
+		INSERT INTO subscription_fetches (vpn_user_id, server_id, device_identifier, connected_at, last_seen)
 		VALUES ($1, $2, $3, NOW(), NOW())
 		ON CONFLICT (vpn_user_id, device_identifier) DO UPDATE SET
 			server_id = EXCLUDED.server_id,
@@ -351,7 +359,7 @@ func (r *VPNRepository) UpsertActiveConnection(ctx context.Context, vpnUserID in
 // Возвращает строку и флаг created (true если только что создана).
 func (r *VPNRepository) UpsertDeviceTouch(ctx context.Context, vpnUserID int64, deviceIdentifier string) (*model.ActiveConnection, bool, error) {
 	query := `
-		INSERT INTO active_connections (vpn_user_id, server_id, device_identifier, connected_at, last_seen)
+		INSERT INTO subscription_fetches (vpn_user_id, server_id, device_identifier, connected_at, last_seen)
 		VALUES ($1, NULL, $2, NOW(), NOW())
 		ON CONFLICT (vpn_user_id, device_identifier) DO UPDATE SET
 			last_seen = NOW()
@@ -370,23 +378,15 @@ func (r *VPNRepository) UpsertDeviceTouch(ctx context.Context, vpnUserID int64, 
 	return conn, inserted, nil
 }
 
-// UpdateLastSeenByVPNUser — обновляет last_seen=NOW() для ВСЕХ устройств
-// юзера. Вызывается heartbeat-ом когда Xray показал рост трафика.
-// См. ограничение модели в docs/services/device-limit.md.
-func (r *VPNRepository) UpdateLastSeenByVPNUser(ctx context.Context, vpnUserID int64) error {
-	_, err := r.db.Exec(ctx, `UPDATE active_connections SET last_seen = NOW() WHERE vpn_user_id = $1`, vpnUserID)
-	return err
-}
-
-// Active Connections.
+// GetActiveConnections возвращает все device-row юзера по vpn_user_id.
 // COALESCE(server_id, 0) — для записей из subscription-touch'а server_id IS NULL.
 // API-слой трактует 0 как "сервер не привязан" и не пытается резолвить имя.
 func (r *VPNRepository) GetActiveConnections(ctx context.Context, vpnUserID int64) ([]*model.ActiveConnection, error) {
 	query := `
-		SELECT ac.id, ac.vpn_user_id, COALESCE(ac.server_id, 0), ac.device_identifier, ac.connected_at, ac.last_seen
-		FROM active_connections ac
-		WHERE ac.vpn_user_id = $1
-		ORDER BY ac.last_seen DESC
+		SELECT sf.id, sf.vpn_user_id, COALESCE(sf.server_id, 0), sf.device_identifier, sf.connected_at, sf.last_seen
+		FROM subscription_fetches sf
+		WHERE sf.vpn_user_id = $1
+		ORDER BY sf.last_seen DESC
 	`
 
 	rows, err := r.db.Query(ctx, query, vpnUserID)
@@ -408,14 +408,14 @@ func (r *VPNRepository) GetActiveConnections(ctx context.Context, vpnUserID int6
 }
 
 func (r *VPNRepository) DisconnectDevice(ctx context.Context, connectionID int64) error {
-	query := `DELETE FROM active_connections WHERE id = $1`
+	query := `DELETE FROM subscription_fetches WHERE id = $1`
 	_, err := r.db.Exec(ctx, query, connectionID)
 	return err
 }
 
 // DeleteVPNUser удаляет запись vpn_users (ON DELETE CASCADE чистит
-// active_connections). Xray inbound-cleanup делается в сервисе ДО вызова
-// этого метода — тут только БД.
+// subscription_fetches и traffic_samples). Xray inbound-cleanup делается
+// в сервисе ДО вызова этого метода — тут только БД.
 func (r *VPNRepository) DeleteVPNUser(ctx context.Context, userID int64) error {
 	_, err := r.db.Exec(ctx, `DELETE FROM vpn_users WHERE user_id = $1`, userID)
 	return err

@@ -1,10 +1,36 @@
-# 06. Лимиты трафика на тариф (vs abusers без per-device UUID)
+# 06. Учёт трафика: retention-метрики + cap на тариф
 
-**Дата:** 2026-04-23
-**Статус:** 🟡 Черновик — обсуждаем перед имплементацией
+**Дата:** 2026-04-23 (черновик), 2026-05-04 (расширено)
+**Статус:** 🟡 В имплементации — Stage 1-2 (traffic_samples + TrafficCron) идут первыми, cap-enforcement опционально позже
 **Автор:** Devin + aziz
 **Родительский:** [02-mvp-c-implementation.md](./02-mvp-c-implementation.md) — новая фича поверх Этапа 4 (subscription)
-**Связано:** [05-trial-period.md](./05-trial-period.md) — триал тоже получит cap (или нет, см. вопросы)
+**Связано:**
+- [05-trial-period.md](./05-trial-period.md) — триал тоже получит cap (или нет, см. вопросы)
+- [15-retention-campaigns.md](./15-retention-campaigns.md) — рассылки на основе traffic_samples, общая схема
+
+---
+
+## 📌 Обновление 2026-05-04 (scope merge)
+
+По факту ad-hoc рассылки для триал-ending 2026-05-03 обнаружилось:
+- `active_connections.last_seen` **не** отвечает на вопрос «реально ли юзер пользуется VPN» — эта колонка обновляется и при subscription-fetch (клиент качает конфиг), и при росте трафика, отличить нельзя.
+- Xray cumulative stats **сбрасываются при рестарте** — никакой исторической видимости.
+- Из 18 юзеров, у которых триал заканчивался в ближайшие сутки, по `active_connections` казалось что 6 подключались; по реальным xray-байтам (dump на всех 3 серверах) — **только 1** юзер реально использовал VPN.
+
+Вывод: **traffic_samples — фундамент не только для cap-enforcement, но и для retention-кампаний**. Поэтому Stage 1-2 этого таска становятся обязательным MVP, Stage 3+ (enforcement) — опционально позже.
+
+Scope merge:
+- Этот таск (06) владеет **infrastructure**: таблица `traffic_samples`, `TrafficCron`, денормализованные `users.first_connection_at / last_traffic_at`, переименование `active_connections` → `subscription_fetches`.
+- Новый таск [15-retention-campaigns.md](./15-retention-campaigns.md) владеет **консьюмером**: RetentionCron, broadcast_drafts/sends, admin-ручки, approve-flow через бот.
+
+**Naming note:** ниже исторический черновик использует имя `traffic_log`. В имплементации таблица называется `traffic_samples` (лучше отражает семантику — это точечные сэмплы дельт, не event log). Везде ниже читать `traffic_log` = `traffic_samples`.
+
+**Доп. миграции из merged scope** (поверх того, что перечислено ниже в исторической части):
+1. `007_rename_active_connections_to_subscription_fetches.{up,down}.sql` в `vpn-service` — RENAME TABLE + DROP COLUMN server_id (всегда NULL для HTTP fetch path) + rename индексов/констрейнтов.
+2. `XXX_user_activity_denorm.{up,down}.sql` в `auth-service` — `users.first_connection_at, last_traffic_at` + initial backfill из `last_active_at`.
+3. `TrafficCron` также обновляет эти денорм-поля в `users` транзакционно с INSERT в `traffic_samples` — чтобы retention-запросы не делали тяжёлый SUM.
+
+**Heartbeat**: после TrafficCron роль `Heartbeat` по traffic-growth обновлению `active_connections.last_seen` устарела. После stage 2 — либо упрощаем Heartbeat (убрать traffic-ветку, оставить только device-limit которая работает через subscription fetch), либо отключаем совсем. См. stage 2 в [15-retention-campaigns.md](./15-retention-campaigns.md).
 
 ---
 

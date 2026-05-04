@@ -189,7 +189,7 @@ type VLESSLinkResult struct {
 //
 // Если deviceIdentifier != "" — проверяется лимит max_devices подписки:
 //   - COUNT активных устройств (last_seen свежее DeviceActivityWindow) < max_devices
-//   - Запись в active_connections создаётся/обновляется (UPSERT)
+//   - Запись в subscription_fetches (бывш. active_connections) создаётся/обновляется (UPSERT)
 //   - Возвращается ErrDeviceLimitExceeded если лимит достигнут и устройство новое
 //
 // Если deviceIdentifier == "" — ссылка возвращается без проверок (admin / debug).
@@ -481,7 +481,7 @@ type RegisterDeviceTouchResult struct {
 
 // RegisterDeviceTouch — best-effort регистрация устройства, тянущего
 // subscription URL. Резолвит token → vpn_user, нормализует UA, апсёртит
-// строку в active_connections (server_id=NULL).
+// строку в subscription_fetches (server_id=NULL).
 //
 // Не валит весь subscription-fetch если что-то упадёт: gateway вызывает
 // этот RPC асинхронно и логирует ошибку, не блокируя ответ клиенту.

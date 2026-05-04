@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/vpn/platform/pkg/closer"
+	grpchealth "github.com/vpn/platform/pkg/grpc/health"
 	"github.com/vpn/platform/pkg/xray"
 	"github.com/vpn/vpn-service/internal/api"
 	"github.com/vpn/vpn-service/internal/config"
@@ -21,17 +22,17 @@ import (
 )
 
 type App struct {
-	config     *config.Config
-	logger     *zap.Logger
-	db         *pgxpool.Pool
-	xrayPool   *xray.Pool // пул gRPC-клиентов по server_id; lazy-connect при первом запросе
-	repo       *repository.VPNRepository
-	svc        *service.VPNService
-	heartbeat  *service.Heartbeat
-	loadCron   *service.LoadCron
-	resyncCron *service.ResyncCron // health-check + periodic resync; авто-восстановление clients[] после рестарта Xray
-	grpcServer *grpc.Server
-	closer     *closer.Closer
+	config      *config.Config
+	logger      *zap.Logger
+	db          *pgxpool.Pool
+	xrayPool    *xray.Pool // пул gRPC-клиентов по server_id; lazy-connect при первом запросе
+	repo        *repository.VPNRepository
+	svc         *service.VPNService
+	trafficCron *service.TrafficCron
+	loadCron    *service.LoadCron
+	resyncCron  *service.ResyncCron // health-check + periodic resync; авто-восстановление clients[] после рестарта Xray
+	grpcServer  *grpc.Server
+	closer      *closer.Closer
 }
 
 func New(logger *zap.Logger) (*App, error) {
@@ -183,13 +184,21 @@ func (a *App) initGRPC() error {
 	a.repo = repository.NewVPNRepository(a.db)
 	a.svc = service.NewVPNService(a.repo, a.xrayPool, a.logger)
 	vpnAPI := api.NewVPNAPI(a.svc, a.logger)
-	a.heartbeat = service.NewHeartbeat(a.repo, a.xrayPool, a.logger)
+	a.trafficCron = service.NewTrafficCron(a.repo, a.xrayPool, a.logger)
 	a.loadCron = service.NewLoadCron(a.repo, a.logger)
 	a.resyncCron = service.NewResyncCron(a.repo, a.xrayPool, a.svc, a.logger)
 
 	a.grpcServer = grpc.NewServer()
 	pb.RegisterVPNServiceServer(a.grpcServer, vpnAPI)
 	reflection.Register(a.grpcServer)
+
+	// gRPC Health (gRPC Health v1) — пинг БД для readiness-проверки.
+	// Xray pool не пингуем — он имеет gracefully-degrading multi-server поведение
+	// (CreateVPNUser использует best-effort partial success). Падение одной exit-ноды
+	// не должно валить /ready всего бэкенда.
+	grpchealth.RegisterServiceWithChecks(a.grpcServer, func(ctx context.Context) error {
+		return a.db.Ping(ctx)
+	})
 
 	a.closer.Add(func(ctx context.Context) error {
 		a.grpcServer.GracefulStop()
@@ -214,14 +223,16 @@ func (a *App) Start() error {
 		}
 	}()
 
-	// Heartbeat: опрос Xray Stats API → обновление last_seen.
+	// TrafficCron: опрос Xray Stats API → запись дельт в traffic_samples +
+	// обновление users.{first_connection_at,last_traffic_at} в auth-service
+	// (через ту же БД; cross-schema UPDATE в одной транзакции).
 	// Ctx отменяется при shutdown → горутина сама корректно завершится.
-	hbCtx, hbCancel := context.WithCancel(context.Background())
+	trafficCtx, trafficCancel := context.WithCancel(context.Background())
 	a.closer.Add(func(ctx context.Context) error {
-		hbCancel()
+		trafficCancel()
 		return nil
 	})
-	go a.heartbeat.Run(hbCtx)
+	go a.trafficCron.Run(trafficCtx)
 
 	// LoadCron: пересчёт vpn_servers.load_percent каждые 60с.
 	loadCtx, loadCancel := context.WithCancel(context.Background())

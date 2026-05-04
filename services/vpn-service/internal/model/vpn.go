@@ -45,6 +45,18 @@ type SubscriptionConfig struct {
 	MaxDevices int32
 }
 
+// ActiveConnection — запись в таблице subscription_fetches (бывш.
+// active_connections) о скачивании клиентом subscription URL (Happ,
+// V2rayTUN, Telegram link-preview) ИЛИ per-server GetVLESSLink вызове.
+// Идентичность — пара (vpn_user_id, device_identifier) где
+// device_identifier — нормализованный User-Agent HTTP-запроса.
+//
+// Historical naming: до 2026-05-04 Heartbeat также обновлял last_seen
+// при росте трафика — это создавало неоднозначность «fetch vs real
+// traffic». После миграции 007 + изменений в Heartbeat таблица содержит
+// ТОЛЬКО fetch-события. Реальный трафик теперь живёт в traffic_samples
+// (миграция 008). Go-тип и proto-сообщение сохраняют имя ActiveConnection
+// для обратной совместимости gRPC API (gateway/frontend).
 type ActiveConnection struct {
 	ID               int64
 	VPNUserID        int64
@@ -52,4 +64,16 @@ type ActiveConnection struct {
 	DeviceIdentifier string
 	ConnectedAt      time.Time
 	LastSeen         time.Time
+}
+
+// TrafficSample — один сэмпл трафика юзера на одном сервере за
+// интервал между тиками TrafficCron (5 мин). Дельты, не кумулятив —
+// благодаря reset=true в xray stats после каждого чтения.
+type TrafficSample struct {
+	ID            int64
+	VPNUserID     int64
+	ServerID      int32
+	UplinkBytes   int64
+	DownlinkBytes int64
+	CollectedAt   time.Time
 }
