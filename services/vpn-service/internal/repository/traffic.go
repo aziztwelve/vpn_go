@@ -120,6 +120,26 @@ func (r *VPNRepository) DeleteTrafficSamplesOlderThan(ctx context.Context, cutof
 	return tag.RowsAffected(), nil
 }
 
+// HasTrafficSamplesForServer проверяет, есть ли в traffic_samples хотя бы
+// одна строка для данного server_id. Используется TrafficCron'ом чтобы
+// отличить «первый тик для этого сервера за всю историю сервиса» (когда
+// накопленный в xray baseline надо отбросить, иначе он запишется как одна
+// гигантская дельта за 5-минутное окно) от обычного тика.
+//
+// Важно: после рестарта сервиса traffic_samples уже содержит записи, и
+// этот метод вернёт true — значит дельта между тиками (включая тики до
+// рестарта) будет засчитана честно, потеряется только окно простоя.
+func (r *VPNRepository) HasTrafficSamplesForServer(ctx context.Context, serverID int32) (bool, error) {
+	var exists bool
+	err := r.db.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM traffic_samples WHERE server_id = $1)
+	`, serverID).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check traffic samples for server: %w", err)
+	}
+	return exists, nil
+}
+
 // ListVPNUserIDByEmail — map email → vpn_user_id для всех записей в vpn_users.
 // Используется TrafficCron'ом для резолвинга "user{ID}@vpn.local" из xray
 // stats в нашу внутреннюю id-шку. Email в xray = email в vpn_users.

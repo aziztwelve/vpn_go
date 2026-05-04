@@ -48,10 +48,30 @@ type TrafficCron struct {
 	repo   *repository.VPNRepository
 	pool   *xray.Pool
 	logger *zap.Logger
+
+	// baselineDone — локальный кэш per-server «первый тик уже пройден».
+	// На первом тике для сервера, где в traffic_samples ещё 0 строк, xray
+	// может держать кумулятивный baseline (трафик, накопленный до того как
+	// cron начал его собирать). Если пропустить его через обычный flow —
+	// он запишется как одна гигантская дельта за 5-минутное окно, что
+	// ломает cap-enforcement и retention-сегментацию. Поэтому на первом
+	// таком тике результат QueryAllUserStats дропаем (но reset=true всё
+	// равно делаем — чтобы xray-счётчики начали с нуля со следующего тика).
+	//
+	// Рестарт сервиса НЕ триггерит этот путь: после первого честного тика
+	// traffic_samples уже содержит строки для сервера, и HasTraffic... вернёт
+	// true при следующем запуске. Потеряется только окно простоя между
+	// последним тиком до рестарта и первым после — обычная semantic дельты.
+	baselineDone map[int32]bool
 }
 
 func NewTrafficCron(repo *repository.VPNRepository, pool *xray.Pool, logger *zap.Logger) *TrafficCron {
-	return &TrafficCron{repo: repo, pool: pool, logger: logger}
+	return &TrafficCron{
+		repo:         repo,
+		pool:         pool,
+		logger:       logger,
+		baselineDone: make(map[int32]bool),
+	}
 }
 
 func (c *TrafficCron) Run(ctx context.Context) {
@@ -138,6 +158,46 @@ func (c *TrafficCron) tick(ctx context.Context) {
 				zap.String("name", srv.Name),
 				zap.Error(err))
 			continue
+		}
+
+		// Baseline-drop на самом первом тике для этого сервера.
+		// Кэш baselineDone чтобы не долбить БД каждый тик — проверяем
+		// HasTrafficSamplesForServer только пока не убедились что для
+		// сервера уже есть хотя бы одна запись. После этого кэш навечно
+		// помечает сервер как «baseline пройден» в рамках жизни процесса.
+		if !c.baselineDone[srv.ID] {
+			has, herr := c.repo.HasTrafficSamplesForServer(ctx, srv.ID)
+			if herr != nil {
+				// Не фейлим весь тик — лучше записать дельту как обычно
+				// и проверить на следующем. В худшем случае один сервер
+				// один раз запишет «толстый» baseline, что уже случалось.
+				c.logger.Warn("traffic cron: baseline check failed, proceeding as normal tick",
+					zap.Int32("server_id", srv.ID),
+					zap.Error(herr))
+			} else if !has {
+				// Первый тик за всю историю сервиса для этого сервера.
+				// Reset уже сделали выше (QueryAllUserStats(true)), так что
+				// xray-счётчики с нуля. Накопленный baseline просто дропаем.
+				var droppedUsers int
+				var droppedBytes int64
+				for _, s := range stats {
+					if s.Uplink == 0 && s.Downlink == 0 {
+						continue
+					}
+					droppedUsers++
+					droppedBytes += s.Uplink + s.Downlink
+				}
+				c.logger.Info("traffic cron: first-tick baseline dropped",
+					zap.Int32("server_id", srv.ID),
+					zap.String("name", srv.Name),
+					zap.Int("dropped_users", droppedUsers),
+					zap.Int64("dropped_bytes", droppedBytes),
+				)
+				c.baselineDone[srv.ID] = true
+				continue
+			} else {
+				c.baselineDone[srv.ID] = true
+			}
 		}
 
 		added := 0
