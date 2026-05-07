@@ -70,7 +70,7 @@ func buildAutoOutbounds(user *pb.VPNUser, servers []*pb.Server) []map[string]int
 					"fingerprint": "chrome",
 					"publicKey":   srv.GetPublicKey(),
 					"serverName":  srv.GetServerNames(),
-					"shortId":     srv.GetShortId(),
+					"shortId":     clientShortID(srv),
 				},
 			},
 			"tag": fmt.Sprintf("proxy-%d", i+1),

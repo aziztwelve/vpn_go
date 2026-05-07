@@ -394,3 +394,64 @@ func TestIsGRPCNotFound(t *testing.T) {
 type dummyErr struct{ msg string }
 
 func (e *dummyErr) Error() string { return e.msg }
+
+// TestClientShortID проверяет, что для RU-SNI серверов в клиентский конфиг
+// уходит ПУСТОЙ shortId — это нужно чтобы LTE-инбаунд (1443/ads.x5.ru)
+// сливался с обычным TLS и не палился DPI операторов РФ. Для остальных
+// SNI (apple.com, github.com, …) shortId передаётся как есть.
+func TestClientShortID(t *testing.T) {
+	cases := []struct {
+		name string
+		sni  string
+		want string
+	}{
+		{"ru sni → empty", "ads.x5.ru", ""},
+		{"ru sni mixed case → empty", "Ads.X5.RU", ""},
+		{"рф sni → empty", "почта.рф", ""},
+		{"su sni → empty", "example.su", ""},
+		{"punycode рф → empty", "example.xn--p1ai", ""},
+		{"apple → original", "apple.com", "abc123"},
+		{"github → original", "github.com", "abc123"},
+		{"empty sni → original", "", "abc123"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv := &pb.Server{ServerNames: c.sni, ShortId: "abc123"}
+			if got := clientShortID(srv); got != c.want {
+				t.Errorf("sni=%q: want %q, got %q", c.sni, c.want, got)
+			}
+		})
+	}
+}
+
+// TestBuildVLESSLink_RUSniEmptyShortID — интеграционный тест на VLESS-URI:
+// для сервера с RU-SNI параметр sid должен быть пустым (`sid=` без значения).
+func TestBuildVLESSLink_RUSniEmptyShortID(t *testing.T) {
+	user := fixtureUser()
+	srv := &pb.Server{
+		Id: 144, Name: "[LTE 1] Мобильный интернет", CountryCode: "DE",
+		Host: "178.105.1.202", Port: 1443,
+		PublicKey:   "GTmCq-rBPvmRTuh7tb_0xZGg7duSUFSB85yXkERZBWw",
+		ShortId:     "b470aa0f3b156a0f",
+		ServerNames: "ads.x5.ru",
+		IsActive:    true,
+	}
+
+	got := buildVLESSLink(user, srv, "📶 LTE")
+
+	qStart := strings.Index(got, "?")
+	qEnd := strings.Index(got, "#")
+	if qStart == -1 || qEnd == -1 {
+		t.Fatalf("missing ?/#: %s", got)
+	}
+	params, err := url.ParseQuery(got[qStart+1 : qEnd])
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := params.Get("sid"); got != "" {
+		t.Errorf("RU-SNI server: want empty sid, got %q", got)
+	}
+	if got := params.Get("sni"); got != "ads.x5.ru" {
+		t.Errorf("sni: %q", got)
+	}
+}

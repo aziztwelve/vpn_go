@@ -297,7 +297,7 @@ func buildVLESSLink(user *pb.VPNUser, srv *pb.Server, remarks string) string {
 	params.Set("security", "reality")
 	params.Set("flow", user.GetFlow())
 	params.Set("pbk", srv.GetPublicKey())
-	params.Set("sid", srv.GetShortId())
+	params.Set("sid", clientShortID(srv))
 	params.Set("sni", srv.GetServerNames())
 	params.Set("fp", "chrome")
 	params.Set("spx", "/")
@@ -518,6 +518,36 @@ func isRussianSNI(sni string) bool {
 		strings.HasSuffix(s, ".xn--p1ai")
 }
 
+// clientShortID возвращает shortId, который должен попасть в клиентский
+// конфиг (VLESS-URI `sid=` или JSON `realitySettings.shortId`).
+//
+// Для RU-SNI серверов (LTE-style: ads.x5.ru, etc) возвращаем пустую строку.
+// Причина — анти-Reality DPI: операторы РФ всё чаще fingerprint'ят TLS
+// extension в session_ticket/PSK, где shortId «прорастает» уникальной
+// 8-байтовой последовательностью. Конкурентский LTE-конфиг (см. memory
+// 2026-05-07) идёт БЕЗ shortId — клиенты сливаются с обычным ads.x5.ru
+// TLS и проходят DPI.
+//
+// ВАЖНО: чтобы это работало без mass-disconnect, на сервере inbound
+// 1443 (RU-SNI) `realitySettings.shortIds` ДОЛЖЕН содержать пустую
+// строку `""` рядом с основным id. Без `""` Reality verify завалится
+// на стороне сервера и юзер вообще не подключится. Сделать на VPS:
+//
+//	jq '.inbounds[] | select(.tag=="vless-reality-rusni-in")
+//	    .streamSettings.realitySettings.shortIds += [""]' \
+//	    /opt/xray/config.json > /tmp/xray.json && \
+//	  mv /tmp/xray.json /opt/xray/config.json && \
+//	  docker restart xray
+//
+// Для не-RU SNI (apple.com, github.com, …) возвращаем обычный shortId
+// — там DPI у нас не палится, лишний риск не нужен.
+func clientShortID(srv *pb.Server) string {
+	if isRussianSNI(srv.GetServerNames()) {
+		return ""
+	}
+	return srv.GetShortId()
+}
+
 func buildInbounds() []map[string]interface{} {
 	// sniffing.routeOnly=false — как в reference vpn_data_json/wisekeys/.
 	// Старые Xray ядра (встроенные в Happ 4.8) требуют это поле явно.
@@ -576,7 +606,7 @@ func buildOutbounds(user *pb.VPNUser, srv *pb.Server) []map[string]interface{} {
 					"fingerprint": "chrome",
 					"publicKey":   srv.GetPublicKey(),
 					"serverName":  srv.GetServerNames(),
-					"shortId":     srv.GetShortId(),
+					"shortId":     clientShortID(srv),
 				},
 			},
 			"tag": "proxy",
