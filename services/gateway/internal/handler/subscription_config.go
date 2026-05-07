@@ -528,13 +528,11 @@ func buildRouting(profile routingProfile) map[string]interface{} {
 
 	case profileFull:
 		// Только локалки/Apple/BT направлены выше. Всё остальное → proxy.
+		// Правило `geosite:category-ads-all` убрали (2026-05-07): часть клиентов
+		// (Happ Android и др.) идёт со старым/обрезанным geosite.dat → ядро
+		// падает с "missing CATEGORY-ADS-ALL section". Блокировка рекламы
+		// доступна юзерам через AdGuard DoH (см. profileYoutube DNS-блок).
 		rules = append(rules,
-			// Реклама → block даже в full VPN (меньше трафика).
-			map[string]interface{}{
-				"domain":      []string{"geosite:category-ads-all"},
-				"outboundTag": "block",
-				"type":        "field",
-			},
 			map[string]interface{}{
 				"network":     "tcp,udp",
 				"outboundTag": "proxy",
@@ -543,14 +541,10 @@ func buildRouting(profile routingProfile) map[string]interface{} {
 		)
 
 	case profileYoutube:
-		// Реклама → block (AdGuard DNS + domain list).
 		// YT-домены + RU-блокировки → proxy. Остальное → direct.
+		// Анти-реклама — через AdGuard DoH в DNS-секции (см. buildDNS),
+		// routing-правило с geosite:category-ads-all убрано (см. profileFull).
 		rules = append(rules,
-			map[string]interface{}{
-				"domain":      []string{"geosite:category-ads-all"},
-				"outboundTag": "block",
-				"type":        "field",
-			},
 			map[string]interface{}{
 				"domain":      youtubeProxyDomains,
 				"outboundTag": "proxy",

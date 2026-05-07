@@ -33,3 +33,5 @@
 - [12-sni-rotation.md](./12-sni-rotation.md) — 🟡 SNI rotation: 4 `serverNames` per inbound + миграция `server_names` в JSONB-array
 - [13-realitlscanner-donors.md](./13-realitlscanner-donors.md) — 🟡 Donor SNI через RealiTLScanner — заменить `apple.com` на 4 локальных донора per VPS (зависит от 12)
 - [14-retire-germany-prod.md](./14-retire-germany-prod.md) — 🟡 Снять Germany (Hetzner) с prod-роутинга, оставить как dev/code-сервер (бэкенд + локальный Xray для тестов)
+- [15-retention-campaigns.md](./15-retention-campaigns.md) — 🟡 Retention-кампании (trial-ending, onboarding, churn) — segmentation engine + draft-approve flow
+- [16-rkn-resilience.md](./16-rkn-resilience.md) — 🟡 RKN-устойчивость control-plane: RU-mirror подписки, multi-domain, anonymous registrar, origin IP whitelist
