@@ -35,3 +35,4 @@
 - [14-retire-germany-prod.md](./14-retire-germany-prod.md) — 🟡 Снять Germany (Hetzner) с prod-роутинга, оставить как dev/code-сервер (бэкенд + локальный Xray для тестов)
 - [15-retention-campaigns.md](./15-retention-campaigns.md) — 🟡 Retention-кампании (trial-ending, onboarding, churn) — segmentation engine + draft-approve flow
 - [16-rkn-resilience.md](./16-rkn-resilience.md) — 🟡 RKN-устойчивость control-plane: RU-mirror подписки, multi-domain, anonymous registrar, origin IP whitelist
+- [17-ru-vps-lte.md](./17-ru-vps-lte.md) — 🟡 RU-VPS для LTE-обхода (Yandex.Cloud) — Hetzner DE не пробивает агрессивный DPI операторов в Хакасии/Сибири, разведка инфры конкурента (geodataload.com)
