@@ -239,6 +239,11 @@ Co-Authored-By: Devin <158243242+devin-ai-integration[bot]@users.noreply.github.
 
 ---
 
+## Связанные сценарии
+
+- **Каскадный relay через РФ** — другая нода (relay-VPS в РФ) указывает на этот exit как на свой `xray_api_host`. Раннер: <ref_file file="/root/.openclaw/workspace/vpn/vpn_go/add_server/README-relay.md" />.
+- **LTE-обход (RU-SNI inbound)** — на этом же VPS добавляется второй inbound на :1443 с `serverNames=ads.x5.ru` для регионов с белым DPI-списком. Раннер пока встроен в <ref_file file="/root/.openclaw/workspace/vpn/vpn_go/docs/vpn/lte.md" /> §«Как добавить LTE-инбаунд на существующий VPS». TODO: вынести в `add_server/README-lte.md` + `prepare-vps-rusni.sh`.
+
 ## Ссылки
 
 - Архитектура multi-server: <ref_file file="/root/.openclaw/workspace/vpn/vpn_go/docs/services/multi-server.md" />
@@ -246,3 +251,6 @@ Co-Authored-By: Devin <158243242+devin-ai-integration[bot]@users.noreply.github.
 - Bootstrap нового VPS (Docker + iptables): <ref_file file="/root/.openclaw/workspace/vpn/vpn_go/add_server/prepare-vps.sh" />
 - xray.Pool: <ref_file file="/root/.openclaw/workspace/vpn/vpn_go/platform/pkg/xray/pool.go" />
 - ResyncServer handler: <ref_file file="/root/.openclaw/workspace/vpn/vpn_go/services/vpn-service/internal/api/vpn.go" />
+- **Подписка & priority-блок:** <ref_file file="/root/.openclaw/workspace/vpn/vpn_go/docs/SUBSCRIPTION.md" />
+- **Каскад через РФ:** <ref_file file="/root/.openclaw/workspace/vpn/vpn_go/docs/vpn/cascade.md" />
+- **LTE-обход (RU-SNI):** <ref_file file="/root/.openclaw/workspace/vpn/vpn_go/docs/vpn/lte.md" />

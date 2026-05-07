@@ -132,30 +132,42 @@ vless://550e8400-e29b-41d4-a716-446655440000@178.104.217.201:8443?flow=xtls-rprx
 
 ## Конфигурации
 
-В **JSON-формате** (HAPP) список зеркалит base64 + автоматический balancer в конце:
+Структура подписки в обоих форматах (с 2026-05-07 после введения <ref_file file="/root/.openclaw/workspace/vpn/vpn_go/services/vpn-service/migrations/009_add_server_priority.up.sql" />):
 
 ```
-⚡ Обычный VPN · 🇩🇪 Germany       ← 3 режима на defaultCountry
-🚀 Обход блокировок · 🇩🇪 Germany    (один и тот же outbound,
-🎬 YouTube без рекламы · 🇩🇪 Germany    разные routing-стратегии)
-🇫🇮 Finland                        ← per-server: «весь трафик через эту
-🇩🇪 Germany                            страну», remarks без префикса
-🇳🇱 Netherlands-01
-🌐 АВТО ВЫБОР                     ← если серверов ≥2
+⚡ Обычный VPN · 🇩🇪 Germany       ← 1) первый режим на defaultCountry-сервере
+🇩🇪 [LTE 1] Мобильный интернет     ← 2..M) priority-блок: серверы с priority>0
+🇫🇮 Finland (через РФ)                  (LTE-обход, каскад) — точечные опции
+                                        для проблемных регионов, ASC по priority
+🚀 Обход блокировок · 🇩🇪 Germany   ← M+1..M+2) ещё два режима
+🎬 YouTube без рекламы · 🇩🇪 Germany     на тот же defaultCountry-сервер
+🇫🇮 Finland                        ← M+3..N) обычные серверы (priority=0),
+🇩🇪 Germany                              ORDER BY load_percent, name
+🇩🇪 Germany-02
+🌐 АВТО ВЫБОР                     ← N+1) только в JSON, при serverов ≥2
 ```
 
-«⚡ Обычный VPN · {country}» и «{flag} {country}» — это один и тот же outbound с одним и тем же `profileFull` routing. Оставляем оба намеренно: первый — в группе «режимов» как «универсальный VPN на дефолте»; второй — в группе выбора географии. Привычный UX базы.
+### Логика порядка
 
-В **base64-формате** (V2RayNG/Hiddify) — 3 «режима» на дефолтную страну + по одной ссылке на каждый сервер (АВТО ВЫБОР невозможен в base64, balancer не выражается через VLESS-URI):
+`vpn_servers.priority` определяет блок:
 
-```
-⚡ Обычный VPN · 🇩🇪 Germany       ← 3 режима на defaultCountry
-🚀 Обход блокировок · 🇩🇪 Germany     (один и тот же outbound,
-🎬 YouTube без рекламы · 🇩🇪 Germany   разные routing-стратегии)
-🇫🇮 Finland                        ← дальше — выбор конкретного
-🇩🇪 Germany                          сервера/географии
-🇳🇱 Netherlands-01
-```
+| priority | Где в подписке | Сортировка | Routing-профиль (JSON) |
+|---|---|---|---|
+| `> 0` | priority-блок (после первого ⚡ режима) | ASC: меньше = выше (1 над 2) | **profileBypass** (split-tunnel «RU прямо, остальное proxy») |
+| `== 0` | normal-блок (после режимов 🚀+🎬) | по `load_percent ASC, name ASC` | profileFull (весь трафик через VPN) |
+| `< 0` | normal-блок, ниже всех `priority=0` | DESC: -1 выше -2 | profileFull |
+
+**Логика дефолтного сервера** для режимов (⚡/🚀/🎬): берётся **первый normal-сервер с country_code == `defaultCountry`** (env-переменная `GATEWAY_DEFAULT_COUNTRY`). Priority>0 серверы **никогда** не становятся дефолтом — они точечные опции для проблемных регионов, не «универсальный VPN». Если в normal нет совпадения по country_code — fallback на первый normal-сервер; если их нет совсем — `servers[0]`.
+
+### Зачем priority-блок
+
+Юзер из проблемного региона (Хакасия с белым DPI-списком, мобильный оператор режет :8443, и т.п.) хочет сразу видеть «попробуй меня — у меня обход» — а не листать длинный список географий, в котором эти опции теряются. Сейчас priority-блок содержит:
+- **🇩🇪 [LTE 1] Мобильный интернет** (priority=10) — RU-SNI inbound на отдельном порту :1443. Подробно: <ref_file file="/root/.openclaw/workspace/vpn/vpn_go/docs/vpn/lte.md" />.
+- **🇫🇮 Finland (через РФ)** (priority=20) — каскадная схема, юзер коннектится в РФ, exit за рубежом. Подробно: <ref_file file="/root/.openclaw/workspace/vpn/vpn_go/docs/vpn/cascade.md" />.
+
+Эти серверы получают `profileBypass` в JSON-формате (split-tunnel) — иначе РУ-сервисы юзера (банки, Госуслуги) ломаются при походе через зарубежный exit (антифрод, geo-блок).
+
+«⚡ Обычный VPN · {country}» и «{flag} {country}» (последний из normal) — выглядят как дубликат outbound'а. Оставляем оба намеренно: первый — в группе «режимов» как «универсальный VPN на дефолте»; второй — в группе выбора географии «весь трафик через эту страну». Привычный UX.
 
 Subscription предоставляет **3 routing-конфигурации** с одинаковыми параметрами подключения, но разной обработкой трафика:
 
