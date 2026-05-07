@@ -364,8 +364,16 @@ func writeJSONFormat(w http.ResponseWriter, cfg *pb.GetSubscriptionConfigRespons
 	// дефолтный routing-профиль для priority — split-tunnel (profileBypass):
 	// RU-домены/IP направо, остальное — через VPN. Это совпадает с подходом
 	// конкурентов (см. memory/2026-05-07.md, секция «анализ конкурента»).
+	//
+	// Дополнительно для LTE-style серверов (server_names в РУ-TLD) переопределяем
+	// DNS на plain UDP `1.1.1.1`/`1.0.0.1` — DoH-эндпоинты (`cloudflare-dns.com:443`)
+	// могут резаться DPI в whitelist-регионах. См. buildPlainDNS().
+	// Каскадные priority-серверы (sni=apple.com) сохраняют DoH.
 	for _, srv := range priorityServers {
 		c := buildXrayConfig(user, srv, profileBypass)
+		if isRussianSNI(srv.GetServerNames()) {
+			c["dns"] = buildPlainDNS()
+		}
 		c["remarks"] = serverRemark(srv)
 		configs = append(configs, c)
 	}
@@ -444,6 +452,11 @@ func buildXrayConfig(user *pb.VPNUser, srv *pb.Server, profile routingProfile) m
 //
 // Для RU-зоны во всех профилях добавляем отдельный split: `geosite:category-ru`
 // идёт через Google DNS (не через proxy) — иначе RU-ресурсы могут тормозить.
+//
+// ВНИМАНИЕ: для LTE-серверов (priority>0 + RU-SNI) этот блок переопределяется
+// на `buildPlainDNS()` в writeJSONFormat — DoH-эндпоинты (`cloudflare-dns.com:443`)
+// могут блокироваться DPI в проблемных регионах (Хакасия), потому что их SNI
+// тоже не в whitelist'е оператора.
 func buildDNS(profile routingProfile) map[string]interface{} {
 	primary := "https://cloudflare-dns.com/dns-query"
 	if profile == profileYoutube {
@@ -464,6 +477,45 @@ func buildDNS(profile routingProfile) map[string]interface{} {
 			},
 		},
 	}
+}
+
+// buildPlainDNS — простой UDP DNS на Cloudflare anycast `1.1.1.1`/`1.0.0.1`.
+//
+// Используется как override для LTE-серверов (priority>0, server_names в РУ-TLD):
+// в проблемных регионах (Хакасия с белым DPI-списком) DoH-эндпоинты могут
+// дропаться по SNI — `cloudflare-dns.com` не в whitelist'е оператора.
+// Plain UDP DNS (port :53) такого SNI не несёт, проходит свободно.
+//
+// Минусы:
+//   - провайдер юзера видит DNS-запросы в открытую (приватность ниже DoH);
+//   - подвержен DNS-spoofing'у на уровне ISP (если включают MITM-DNS).
+//
+// Для LTE-кейса приоритет «работает» > «приватно», поэтому ок.
+// Совпадает с подходом коммерческих VPN (см. memory 2026-05-07, анализ конкурента).
+func buildPlainDNS() map[string]interface{} {
+	return map[string]interface{}{
+		"queryStrategy": "UseIP",
+		"servers": []interface{}{
+			"1.1.1.1",
+			"1.0.0.1",
+		},
+	}
+}
+
+// isRussianSNI — server_names сервера в РУ-TLD (`.ru` / `.рф` / `.su` /
+// `.xn--p1ai` punycode .рф). Используется для детекции «LTE-style» серверов
+// без введения дополнительной колонки в БД: если SNI российский, сервер
+// предназначен для регионов с белым DPI-списком, ему нужен plain DNS.
+//
+// Этого хватает для нашего use-case: каскадный сервер тоже priority>0,
+// но его server_names = `apple.com` (то же что у обычных), поэтому он
+// корректно НЕ попадёт под override DNS и продолжит использовать DoH.
+func isRussianSNI(sni string) bool {
+	s := strings.ToLower(strings.TrimSpace(sni))
+	return strings.HasSuffix(s, ".ru") ||
+		strings.HasSuffix(s, ".рф") ||
+		strings.HasSuffix(s, ".su") ||
+		strings.HasSuffix(s, ".xn--p1ai")
 }
 
 func buildInbounds() []map[string]interface{} {

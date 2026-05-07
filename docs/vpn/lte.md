@@ -340,7 +340,15 @@ INSERT INTO vpn_servers (..., port=2443, server_names='dzen.ru', dest='dzen.ru:4
 
 5. **Перезапуск Xray рвёт текущие коннекты** на 1-2 секунды. Происходит при добавлении нового inbound'а. Делай перезапуск **в тихие часы** (3-5 утра МСК), а не в пиковую нагрузку (~21:00 МСК).
 
-6. **DNS-блокировки в проблемных регионах**. У нас `buildDNS()` использует **DoH** (`https://cloudflare-dns.com/dns-query`). В Хакасии/проблемных регионах могут резать DoH-эндпоинты как «зарубежный HTTPS». Если LTE-сервер не работает у юзера несмотря на правильный SNI — переключиться на plain DNS `1.1.1.1`/`1.0.0.1` (как у конкурента). См. TODO ниже.
+6. **DNS-блокировки в проблемных регионах** ✅ **решено для LTE** (2026-05-07).
+
+   У нас `buildDNS()` использует **DoH** (`https://cloudflare-dns.com/dns-query`). В Хакасии/проблемных регионах могут резать DoH-эндпоинты, потому что `cloudflare-dns.com` тоже не в whitelist'е оператора → DNS не резолвится → юзер видит «no internet» при включённом VPN.
+
+   **Фикс**: для LTE-серверов (priority>0 + RU-TLD в `server_names`) handler `writeJSONFormat` подставляет `buildPlainDNS()` вместо `buildDNS()`. Это **plain UDP DNS** на `1.1.1.1`/`1.0.0.1` без TLS — DPI не может проверить SNI и пропускает.
+
+   Каскадные priority-серверы (`sni=apple.com`) сохраняют DoH — их DNS обычно не нужен в проблемных регионах, у них и так apple.com SNI который пропускают любые DPI.
+
+   Детектор: `isRussianSNI(srv.GetServerNames())` — `.ru` / `.рф` / `.su` / `.xn--p1ai`. См. <ref_file file="/root/.openclaw/workspace/vpn/vpn_go/services/gateway/internal/handler/subscription_config.go" />.
 
 7. **`pickDefaultServer` пропускает priority>0**. То есть LTE-сервер **никогда не становится дефолтом для режимов** (⚡/🚀/🎬). Это by design: LTE — точечная опция, не «универсальный VPN». Если переименовать LTE в дефолтную страну — режимы переедут на другой normal-сервер.
 
@@ -381,7 +389,7 @@ Reality-ключи **разные** для двух inbound'ов (генерир
 
 ## 📋 TODO
 
-- [ ] **Plain DNS для priority-профилей**: убрать DoH (`cloudflare-dns.com:443`) для LTE/каскада, использовать `1.1.1.1`/`1.0.0.1` напрямую — DoH может резаться там же где зарубежный SNI.
+- [x] **Plain DNS для LTE-инбаундов** ✅ 2026-05-07 — `isRussianSNI` детектор + `buildPlainDNS()` override в `writeJSONFormat`.
 - [ ] **2-3 запасных LTE-инбаунда** в горячем резерве с разными `dest` (`dzen.ru`, `ya.ru`) — если основной spalится.
 - [ ] **TCP-health-check для LTE :1443** в `vpn-core` (сейчас бэкенд пингует только `xray_api_host:xray_api_port = :10085`).
 - [ ] **`prepare-vps-rusni.sh`**: bootstrap-скрипт «всё-в-одном» для нового VPS с двумя inbound'ами сразу.
