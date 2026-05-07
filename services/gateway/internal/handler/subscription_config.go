@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -138,7 +139,7 @@ func (h *SubscriptionConfigHandler) serve(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Subscription-Userinfo", userInfo)
 	w.Header().Set("Profile-Title", profileTitle)
 	w.Header().Set("Content-Disposition", "attachment; filename="+filename)
-	w.Header().Set("Support-URL", "https://t.me/maydavpn_support_bot")
+	w.Header().Set("Support-URL", "https://t.me/maydavpn_support")
 	w.Header().Set("Profile-Web-Page-URL", "https://cdn.osmonai.com")
 	// Happ всегда создаёт `freedom` outbound с тегом `fragment` — читает значения
 	// из этих заголовков и подставляет в Xray config как `fragment.length/packets/interval`.
@@ -190,41 +191,54 @@ func (h *SubscriptionConfigHandler) serve(w http.ResponseWriter, r *http.Request
 // plain-text, base64(VLESS-ссылки по одной на строку).
 //
 // Структура списка в UI клиента:
-//   1) ⚡ Обычный VPN            ← на "лучший" сервер (min load_percent)
-//   2) 🚀 Обход блокировок       ← на тот же сервер
-//   3) 🎬 YouTube без рекламы    ← на тот же сервер
-//   4) 🇩🇪 Germany                ← прямая ссылка на сервер #1
-//   5) 🇫🇮 Finland                ← прямая ссылка на сервер #2 (если есть)
-//   ...
-//
-// Первые три — "режимы" (одинаковый outbound, разные remarks для UX-подсказки).
-// Остальные — выбор конкретной страны/сервера (на случай нескольких VPS).
+//   1) ⚡ Обычный VPN            ← режим на «дефолтный» сервер (см. ниже)
+//   2..M) Priority-серверы       ← {flag} {name} для серверов с priority>0
+//                                  (например «🇩🇪 [LTE 1] Мобильный интернет»,
+//                                   «🇫🇮 Finland (через РФ)») — сразу под
+//                                  главным режимом, чтобы юзер из проблемной
+//                                  сети не листал длинный список.
+//   M+1) 🚀 Обход блокировок     ← на тот же дефолтный сервер
+//   M+2) 🎬 YouTube без рекламы  ← на тот же дефолтный сервер
+//   M+3..N) Обычные серверы      ← остальные {flag} {name} (priority=0),
+//                                  отсортированные по load_percent
 //
 // Дефолтный сервер для трёх режимов выбирается так:
-//  1. Если defaultCountry задан и в активных есть сервер с таким country_code —
-//     берём его (первый match), вне зависимости от load_percent.
-//  2. Иначе fallback на servers[0] (репо отдаёт отсортированным по load_percent,
-//     наименее нагруженный — первый).
+//  1. Если defaultCountry задан и в активных есть сервер с этим country_code
+//     И priority=0 — берём его. Priority-серверы НЕ становятся дефолтом для
+//     режимов: они — точечные опции, а не «универсальный VPN».
+//  2. Иначе fallback на первый normal-сервер (priority=0); если их нет —
+//     servers[0]. Репо отдаёт отсортированным по load_percent.
 // Это даёт «закреплённую» страну для базового опыта: меньше сюрпризов когда
 // у юзера несколько локаций и хочется чтобы режимы всегда стартовали с одной.
 func writeBase64Format(w http.ResponseWriter, cfg *pb.GetSubscriptionConfigResponse, defaultCountry string) {
 	servers := cfg.GetServers()
 	user := cfg.GetVpnUser()
 
+	priorityServers, normalServers := splitByPriority(servers)
+	best := pickDefaultServer(servers, defaultCountry)
+
 	var sb strings.Builder
 
-	// Режимы — на дефолтный сервер (см. doc-комментарий).
-	if len(servers) > 0 {
-		best := pickDefaultServer(servers, defaultCountry)
-		for _, p := range defaultProfiles {
+	if best != nil {
+		sb.WriteString(buildVLESSLink(user, best, profileRemark(profileFull, best)))
+		sb.WriteByte('\n')
+	}
+
+	// Priority-блок (LTE / каскад / специальные обходы) — ПЕРЕД остальными
+	// режимами. Юзер из проблемной сети сразу видит альтернативу.
+	for _, srv := range priorityServers {
+		sb.WriteString(buildVLESSLink(user, srv, serverRemark(srv)))
+		sb.WriteByte('\n')
+	}
+
+	if best != nil {
+		for _, p := range []routingProfile{profileBypass, profileYoutube} {
 			sb.WriteString(buildVLESSLink(user, best, profileRemark(p, best)))
 			sb.WriteByte('\n')
 		}
 	}
 
-	// Ссылки на конкретные серверы — имена "{flag} {server.name}", без
-	// profile-префикса. Когда будет несколько VPS, юзер выбирает географию.
-	for _, srv := range servers {
+	for _, srv := range normalServers {
 		sb.WriteString(buildVLESSLink(user, srv, serverRemark(srv)))
 		sb.WriteByte('\n')
 	}
@@ -232,6 +246,41 @@ func writeBase64Format(w http.ResponseWriter, cfg *pb.GetSubscriptionConfigRespo
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(base64.StdEncoding.EncodeToString([]byte(sb.String()))))
+}
+
+// splitByPriority разделяет список серверов на priority-блок и normal-блок.
+//
+//	priority >  0: priority-блок (вверху подписки, сразу после первого режима).
+//	               Сортируется ASC: меньшее число выше (priority=1 над priority=2).
+//	priority == 0: normal-блок, обычный порядок (load_percent, name из репо).
+//	priority <  0: normal-блок, ПОНИЖЕНИЕ — ниже всех priority=0.
+//	               Сортируется DESC: -1 выше -2 (более «отрицательное» — ниже).
+//
+// Применение priority<0: пометить устаревший/резервный сервер чтобы он не
+// мозолил глаза вверху списка географий, но всё ещё был доступен.
+//
+// Stable-сортировка гарантирует, что при равных priority порядок из репо
+// (ORDER BY load_percent, name) сохраняется.
+func splitByPriority(servers []*pb.Server) (priority, normal []*pb.Server) {
+	for _, s := range servers {
+		if s.GetPriority() > 0 {
+			priority = append(priority, s)
+		} else {
+			normal = append(normal, s)
+		}
+	}
+	if len(priority) > 1 {
+		sort.SliceStable(priority, func(i, j int) bool {
+			return priority[i].GetPriority() < priority[j].GetPriority()
+		})
+	}
+	if len(normal) > 1 {
+		sort.SliceStable(normal, func(i, j int) bool {
+			// Больший priority выше. priority=0 идут перед priority<0.
+			return normal[i].GetPriority() > normal[j].GetPriority()
+		})
+	}
+	return priority, normal
 }
 
 // buildVLESSLink — VLESS URI с уже готовым #remarks.
@@ -272,21 +321,18 @@ func serverRemark(srv *pb.Server) string {
 	return fmt.Sprintf("%s %s", flagEmoji(srv.GetCountryCode()), srv.GetName())
 }
 
-// writeJSONFormat — массив Xray-конфигов в порядке (зеркалит base64-список):
+// writeJSONFormat — массив Xray-конфигов в том же порядке что base64-список:
 //
-//   1. ⚡ Обычный VPN · {flag} {default-country}         ← весь трафик
-//   2. 🚀 Обход блокировок · {flag} {default-country}    ← split-tunnel
-//   3. 🎬 YouTube без рекламы · {flag} {default-country} ← YT + AdGuard DNS
-//   4. {flag} {server.name}     ← profileFull на каждый сервер,
-//   ...                            remarks без profile-префикса
-//   N+3. 🌐 АВТО ВЫБОР           ← если серверов ≥2
+//   1. ⚡ Обычный VPN · {flag} {default-country}    ← profileFull, дефолтный
+//   2..M. {flag} {priority-server.name}             ← priority>0, сразу
+//                                                     под главным режимом
+//   M+1. 🚀 Обход блокировок · {flag} {default-country}
+//   M+2. 🎬 YouTube без рекламы · {flag} {default-country}
+//   M+3..N. {flag} {normal-server.name}             ← priority=0
+//   N+1. 🌐 АВТО ВЫБОР                              ← если активных ≥2
 //
-// Первые три — «режимы» на defaultCountry-сервере (фиксированная страна,
-// не привязанная к load_percent — чтобы юзер не получал случайную VPS при
-// каждом обновлении подписки).
-//
-// `⚡ Обычный VPN · {country}` и `{flag} {country}` ниже выглядят как
-// дубликат (тот же outbound, тот же profileFull). Оставляем оба намеренно:
+// `⚡ Обычный VPN · {country}` и `{flag} {country}` (один из normal-серверов)
+// дают дубликат outbound'а. Оставляем намеренно:
 //   - первый — в группе режимов, как «универсальный VPN на дефолте»;
 //   - второй — в группе выбора географии, как «весь трафик через эту страну».
 // Юзеру это даёт привычный UX: сначала «как роутить», потом «через какую
@@ -298,6 +344,9 @@ func writeJSONFormat(w http.ResponseWriter, cfg *pb.GetSubscriptionConfigRespons
 	servers := cfg.GetServers()
 	user := cfg.GetVpnUser()
 
+	priorityServers, normalServers := splitByPriority(servers)
+	best := pickDefaultServer(servers, defaultCountry)
+
 	// 3 mode-конфига + N per-server + 1 auto.
 	estimate := len(defaultProfiles) + len(servers)
 	if len(servers) >= 2 {
@@ -305,26 +354,37 @@ func writeJSONFormat(w http.ResponseWriter, cfg *pb.GetSubscriptionConfigRespons
 	}
 	configs := make([]map[string]interface{}, 0, estimate)
 
-	// 1) Все 3 режима — на дефолтный сервер.
-	if len(servers) > 0 {
-		best := pickDefaultServer(servers, defaultCountry)
-		for _, p := range defaultProfiles {
+	if best != nil {
+		configs = append(configs, buildXrayConfig(user, best, profileFull))
+	}
+
+	// Priority-серверы (LTE-обход / каскад) предназначены для проблемных
+	// регионов — у юзеров там часто отказывают РУ-сервисы при походе
+	// через зарубежный exit (антифрод банков, geo-блок Госуслуг). Поэтому
+	// дефолтный routing-профиль для priority — split-tunnel (profileBypass):
+	// RU-домены/IP направо, остальное — через VPN. Это совпадает с подходом
+	// конкурентов (см. memory/2026-05-07.md, секция «анализ конкурента»).
+	for _, srv := range priorityServers {
+		c := buildXrayConfig(user, srv, profileBypass)
+		c["remarks"] = serverRemark(srv)
+		configs = append(configs, c)
+	}
+
+	if best != nil {
+		for _, p := range []routingProfile{profileBypass, profileYoutube} {
 			configs = append(configs, buildXrayConfig(user, best, p))
 		}
 	}
 
-	// 2) Per-server: один profileFull-конфиг на каждый сервер с remarks
-	//    "{flag} {server.name}" (без profile-префикса). Эта же запись
-	//    выполняет роль «⚡ Обычный VPN на эту страну».
-	for _, srv := range servers {
+	for _, srv := range normalServers {
 		c := buildXrayConfig(user, srv, profileFull)
 		c["remarks"] = serverRemark(srv)
 		configs = append(configs, c)
 	}
 
-	// 3) Auto-balancer — В КОНЦЕ списка чтобы не менять "default selection"
-	//    у уже подключившихся клиентов (HAPP по умолчанию выбирает первую
-	//    запись). Эмитим только когда серверов ≥2.
+	// Auto-balancer — В КОНЦЕ списка чтобы не менять "default selection"
+	// у уже подключившихся клиентов (HAPP по умолчанию выбирает первую
+	// запись). Эмитим только когда серверов ≥2.
 	if len(servers) >= 2 {
 		configs = append(configs, buildAutoXrayConfig(user, servers))
 	}
@@ -580,16 +640,36 @@ func buildRouting(profile routingProfile) map[string]interface{} {
 // --- helpers ---
 
 // pickDefaultServer возвращает «дефолтный» сервер для трёх режимов подписки.
-// Если country задан (UPPERCASE) и среди servers есть сервер с таким
-// country_code — возвращает его (первый match). Иначе — servers[0].
-// Вызывающий должен гарантировать len(servers) > 0.
+// Логика:
+//  1. Среди normal-серверов (priority == 0) ищем первый с country_code,
+//     совпадающим с defaultCountry → берём его (закреплённая страна).
+//  2. Если такой не нашёлся — первый normal-сервер (servers отсортированы по
+//     load_percent, наименее нагруженный — первый).
+//  3. Если normal-серверов нет совсем — fallback на servers[0] (любой
+//     priority-сервер).
+//  4. Если servers пустой — nil.
+//
+// Priority-серверы НЕ становятся дефолтом: они — точечные опции (LTE-обход,
+// каскад через РФ), а не «универсальный VPN». Юзер выбирает их явно из
+// списка под главным режимом.
 func pickDefaultServer(servers []*pb.Server, country string) *pb.Server {
-	if country != "" {
-		for _, s := range servers {
-			if strings.EqualFold(s.GetCountryCode(), country) {
-				return s
-			}
+	if len(servers) == 0 {
+		return nil
+	}
+	var firstNormal *pb.Server
+	for _, s := range servers {
+		if s.GetPriority() != 0 {
+			continue
 		}
+		if firstNormal == nil {
+			firstNormal = s
+		}
+		if country != "" && strings.EqualFold(s.GetCountryCode(), country) {
+			return s
+		}
+	}
+	if firstNormal != nil {
+		return firstNormal
 	}
 	return servers[0]
 }

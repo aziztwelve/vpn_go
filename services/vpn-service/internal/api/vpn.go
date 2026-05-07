@@ -108,6 +108,7 @@ func (a *VPNAPI) GetVLESSLink(ctx context.Context, req *pb.GetVLESSLinkRequest) 
 			ServerNames: res.Server.ServerNames,
 			IsActive:    res.Server.IsActive,
 			LoadPercent: res.Server.LoadPercent,
+			Priority:    res.Server.Priority,
 		},
 		CurrentDevices: res.CurrentDevices,
 		MaxDevices:     res.MaxDevices,
@@ -137,6 +138,7 @@ func (a *VPNAPI) ListServers(ctx context.Context, req *pb.ListServersRequest) (*
 			ServerNames: server.ServerNames,
 			IsActive:    server.IsActive,
 			LoadPercent: server.LoadPercent,
+			Priority:    server.Priority,
 		})
 	}
 
@@ -227,6 +229,7 @@ func (a *VPNAPI) GetSubscriptionConfig(ctx context.Context, req *pb.GetSubscript
 			ServerNames: s.ServerNames,
 			IsActive:    s.IsActive,
 			LoadPercent: s.LoadPercent,
+			Priority:    s.Priority,
 		})
 	}
 

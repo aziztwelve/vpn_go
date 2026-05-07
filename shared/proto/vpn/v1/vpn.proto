@@ -183,6 +183,9 @@ message Server {
   string server_names = 10;
   bool is_active = 11;
   int32 load_percent = 12;
+  // priority: 0 — обычный сервер, >0 — «приоритетный» (эмитится сразу после
+  // первого режима в подписке, меньшее число — выше в списке).
+  int32 priority = 13;
 }
 
 message ActiveConnection {

@@ -22,6 +22,9 @@ type VPNServer struct {
 	ServerMaxConnections int32
 	Description          string
 	CreatedAt            time.Time
+	// Priority: 0 — обычный сервер, >0 — «приоритетный» в выдаче подписки
+	// (эмитится сразу после первого режима, меньшее число = выше).
+	Priority             int32
 }
 
 type VPNUser struct {
