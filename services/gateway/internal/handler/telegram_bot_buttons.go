@@ -76,12 +76,23 @@ func resolveInstructionPostURL() string {
 // sendStartMessage), чтобы юзер мог открыть статус/тарифы прямо из welcome
 // без необходимости тапать reply-кнопку внизу. Оба callback'а ведут на те
 // же хендлеры, что и text-match'и reply-кнопок.
+//
+// Buy-flow (3-step picker):
+//   buy_plan_<plan_id>                — юзер выбрал план → показываем устройства
+//   buy_confirm_<plan_id>_<devices>   — юзер выбрал кол-во устройств → CreateInvoice
+//   buy_back_plans                    — назад со страницы устройств в список планов
+//   buy_back_dev_<plan_id>            — назад со страницы invoice в выбор устройств
+//   cbBuyQuickPrefix                  — DEPRECATED, оставлен ради старых сообщений.
 const (
-	cbGetSubLink     = "get_sub_link"
-	cbConnectPrompt  = "connect_prompt"
-	cbBuyPrompt      = "buy_prompt"
-	cbBuyQuickPrefix = "buy_quick_"
-	cbCancelInvoice  = "cancel_invoice"
+	cbGetSubLink           = "get_sub_link"
+	cbConnectPrompt        = "connect_prompt"
+	cbBuyPrompt            = "buy_prompt"
+	cbBuyQuickPrefix       = "buy_quick_"   // deprecated (см. buy_confirm_)
+	cbBuyPlanPrefix        = "buy_plan_"
+	cbBuyConfirmPrefix     = "buy_confirm_"
+	cbBuyBackPlans         = "buy_back_plans"
+	cbBuyBackDevicesPrefix = "buy_back_dev_"
+	cbCancelInvoice        = "cancel_invoice"
 )
 
 // promoPlanIDExcluded — id плана «Промо 79₽», который выдаётся через
@@ -497,33 +508,55 @@ func (h *TelegramBotHandler) handleBuyButton(ctx context.Context, chatID, telegr
 		return
 	}
 
-	text, quickPlan := renderPlansText(plans)
-	if quickPlan == nil {
-		// Нет 1-месячного — fallback: только кнопка Mini App.
-		kb := &telegram.InlineKeyboardMarkup{
-			InlineKeyboard: [][]telegram.InlineKeyboardButton{{
-				{Text: "📱 Открыть приложение", WebApp: &telegram.WebAppInfo{URL: webAppPlansURL}},
-			}},
-		}
-		_ = h.telegramClient.SendMessage(ctx, telegram.SendMessageParams{
-			ChatID: chatID, Text: text, ParseMode: "HTML", ReplyMarkup: kb,
-		})
-		return
-	}
-
-	quickText := fmt.Sprintf("💳 1мес — %s₽", formatRub(quickPlan.BasePrice))
-	kb := &telegram.InlineKeyboardMarkup{
-		InlineKeyboard: [][]telegram.InlineKeyboardButton{{
-			{Text: quickText, CallbackData: fmt.Sprintf("%s%d", cbBuyQuickPrefix, quickPlan.Id)},
-			{Text: "📱 Все тарифы", WebApp: &telegram.WebAppInfo{URL: webAppPlansURL}},
-		}},
-	}
+	text, kb := buildPlansMenu(plans)
 	_ = h.telegramClient.SendMessage(ctx, telegram.SendMessageParams{
 		ChatID:      chatID,
 		Text:        text,
 		ParseMode:   "HTML",
 		ReplyMarkup: kb,
 	})
+}
+
+// buildPlansMenu — общий рендер для handleBuyButton (новое сообщение) и
+// handleBuyBackToPlans (edit существующего). Для каждого видимого плана —
+// одна inline-кнопка с базовой ценой (2 устройства) и %-скидкой
+// относительно ставки 1мес × число месяцев. Сортировка по duration_days
+// уже выставлена filterVisiblePlans.
+func buildPlansMenu(plans []*subpb.SubscriptionPlan) (string, *telegram.InlineKeyboardMarkup) {
+	const heading = "🛒 <b>Выбери тариф</b>\n─────────\n" +
+		"<i>Базовая цена показана для 2 устройств. На следующем шаге выберешь сколько устройств подключить.</i>"
+
+	var basePerMonth float64
+	for _, p := range plans {
+		if p.DurationDays == 30 {
+			basePerMonth, _ = strconv.ParseFloat(p.BasePrice, 64)
+			break
+		}
+	}
+
+	rows := make([][]telegram.InlineKeyboardButton, 0, len(plans))
+	for _, p := range plans {
+		months := int(p.DurationDays / 30)
+		priceN, _ := strconv.ParseFloat(p.BasePrice, 64)
+
+		label := humanDuration(p.DurationDays) + " · " + formatRub(p.BasePrice) + " ₽"
+		if months > 1 && basePerMonth > 0 {
+			full := basePerMonth * float64(months)
+			if priceN > 0 && priceN < full {
+				if pct := int(math.Round((1 - priceN/full) * 100)); pct > 0 {
+					label += fmt.Sprintf(" -%d%%", pct)
+				}
+			}
+		}
+		if months == 12 {
+			label += " ⭐"
+		}
+		rows = append(rows, []telegram.InlineKeyboardButton{{
+			Text:         label,
+			CallbackData: fmt.Sprintf("%s%d", cbBuyPlanPrefix, p.Id),
+		}})
+	}
+	return heading, &telegram.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
 // filterVisiblePlans — только активные плательные планы, без trial и без
@@ -542,9 +575,11 @@ func filterVisiblePlans(plans []*subpb.SubscriptionPlan) []*subpb.SubscriptionPl
 	return out
 }
 
-// renderPlansText строит сам текст карточки тарифов и попутно находит
-// 1-месячный план для quick-buy. Скидки считаются относительно цены
-// 1-месячного × число месяцев. Если 1-месячного нет — quickPlan=nil.
+// renderPlansText — старый рендер «список тарифов плюс quick-buy 1мес»;
+// заменён на buildPlansMenu в task #ребилд бот-флоу. Файл оставлен на тот
+// случай если в будущем понадобится текст-сводка без интерактива (для
+// /help / админки), и чтобы у тестов TestHandleBuyButton_RendersPlans
+// не было спайдер-импортов.
 func renderPlansText(plans []*subpb.SubscriptionPlan) (string, *subpb.SubscriptionPlan) {
 	var quickPlan *subpb.SubscriptionPlan
 	var basePerMonth float64
@@ -555,19 +590,16 @@ func renderPlansText(plans []*subpb.SubscriptionPlan) (string, *subpb.Subscripti
 			break
 		}
 	}
-
 	var b strings.Builder
 	b.WriteString("🛒 <b>Тарифы</b>\n─────────\n")
 	for _, p := range plans {
 		months := int(p.DurationDays / 30)
 		priceN, _ := strconv.ParseFloat(p.BasePrice, 64)
-
 		discount := ""
 		if months > 1 && basePerMonth > 0 {
 			full := basePerMonth * float64(months)
 			if priceN > 0 && priceN < full {
-				pct := int(math.Round((1 - priceN/full) * 100))
-				if pct > 0 {
+				if pct := int(math.Round((1 - priceN/full) * 100)); pct > 0 {
 					discount = fmt.Sprintf(" (-%d%%)", pct)
 				}
 			}
@@ -579,7 +611,6 @@ func renderPlansText(plans []*subpb.SubscriptionPlan) (string, *subpb.Subscripti
 		fmt.Fprintf(&b, "• %s — <b>%s ₽</b>%s%s\n",
 			humanDuration(p.DurationDays), formatRub(p.BasePrice), discount, star)
 	}
-	b.WriteString("\n<i>Базово 2 устройства · можно расширить в приложении</i>")
 	return b.String(), quickPlan
 }
 
@@ -612,11 +643,25 @@ func formatRub(s string) string {
 	return s
 }
 
-// handleBuyQuick — callback `buy_quick_<plan_id>`. Создаёт wata-инвойс,
-// edit-ит сообщение в "К оплате X₽" с URL-кнопкой "Оплатить" и "Отмена".
+// handleBuyQuick — DEPRECATED, см. cbBuyQuickPrefix. Перенаправляет на
+// новый buy-flow с дефолтным числом устройств, чтобы старые сообщения
+// (из истории чата с прошлой версии) не висели мёртвыми кнопками.
 func (h *TelegramBotHandler) handleBuyQuick(ctx context.Context, callback *CallbackQuery, planIDStr string) {
-	if h.paymentClient == nil || callback.Message == nil {
-		h.answerCallback(ctx, callback.ID, "❌ Платежи недоступны", true)
+	planID64, err := strconv.ParseInt(planIDStr, 10, 32)
+	if err != nil || planID64 <= 0 {
+		h.answerCallback(ctx, callback.ID, "❌ Некорректный план", true)
+		return
+	}
+	h.handleBuyConfirm(ctx, callback, int32(planID64), botBuyDefaultMaxDevices)
+}
+
+// handleBuyPlan — callback "buy_plan_<plan_id>". Юзер выбрал тариф (1мес/
+// 3мес/...), показываем меню выбора количества устройств. Цены берутся из
+// device_addon_pricing (subscriptionClient.GetDevicePricing). Внизу —
+// кнопка «◀️ Назад» возвращает на список планов (handleBuyBackToPlans).
+func (h *TelegramBotHandler) handleBuyPlan(ctx context.Context, callback *CallbackQuery, planIDStr string) {
+	if callback.Message == nil {
+		h.answerCallback(ctx, callback.ID, "", false)
 		return
 	}
 	planID64, err := strconv.ParseInt(planIDStr, 10, 32)
@@ -626,10 +671,88 @@ func (h *TelegramBotHandler) handleBuyQuick(ctx context.Context, callback *Callb
 	}
 	planID := int32(planID64)
 
+	plan, err := h.lookupPlan(ctx, planID)
+	if err != nil || plan == nil {
+		h.logger.Warn("buy_plan: plan lookup failed",
+			zap.Int32("plan_id", planID), zap.Error(err))
+		h.answerCallback(ctx, callback.ID, "❌ Тариф не найден", true)
+		return
+	}
+
+	pricing, err := h.subscriptionClient.GetDevicePricing(ctx, planID)
+	if err != nil || pricing == nil || len(pricing.Prices) == 0 {
+		h.logger.Error("buy_plan: GetDevicePricing failed",
+			zap.Int32("plan_id", planID), zap.Error(err))
+		h.answerCallback(ctx, callback.ID, "❌ Не удалось загрузить цены устройств", true)
+		return
+	}
+
+	// Сортируем по max_devices ASC — проще читать (2,3,4,5,10).
+	prices := append([]*subpb.DevicePrice(nil), pricing.Prices...)
+	sort.Slice(prices, func(i, j int) bool { return prices[i].MaxDevices < prices[j].MaxDevices })
+
+	text := fmt.Sprintf(
+		"📱 <b>%s · %s ₽</b>\n─────────\n"+
+			"Сколько устройств подключить?\n"+
+			"<i>Цена меняется в зависимости от количества устройств.</i>",
+		humanDuration(plan.DurationDays),
+		formatRub(plan.BasePrice),
+	)
+
+	// 2 кнопки в ряд для компактности (на мобиле 2-широких помещаются).
+	rows := make([][]telegram.InlineKeyboardButton, 0, len(prices)/2+2)
+	row := make([]telegram.InlineKeyboardButton, 0, 2)
+	for _, p := range prices {
+		if p == nil {
+			continue
+		}
+		btn := telegram.InlineKeyboardButton{
+			Text:         fmt.Sprintf("%d %s · %s ₽", p.MaxDevices, deviceWord(p.MaxDevices), formatRub(p.Price)),
+			CallbackData: fmt.Sprintf("%s%d_%d", cbBuyConfirmPrefix, planID, p.MaxDevices),
+		}
+		row = append(row, btn)
+		if len(row) == 2 {
+			rows = append(rows, row)
+			row = make([]telegram.InlineKeyboardButton, 0, 2)
+		}
+	}
+	if len(row) > 0 {
+		rows = append(rows, row)
+	}
+	rows = append(rows, []telegram.InlineKeyboardButton{
+		{Text: "◀️ Назад к тарифам", CallbackData: cbBuyBackPlans},
+	})
+
+	if err := h.telegramClient.EditMessageText(ctx, telegram.EditMessageTextParams{
+		ChatID:      callback.Message.Chat.ID,
+		MessageID:   callback.Message.MessageID,
+		Text:        text,
+		ParseMode:   "HTML",
+		ReplyMarkup: &telegram.InlineKeyboardMarkup{InlineKeyboard: rows},
+	}); err != nil {
+		h.logger.Warn("buy_plan: edit message failed",
+			zap.Int64("chat_id", callback.Message.Chat.ID), zap.Error(err))
+	}
+	h.answerCallback(ctx, callback.ID, "", false)
+}
+
+// handleBuyConfirm — callback "buy_confirm_<plan_id>_<max_devices>".
+// Финальный шаг: создаём wata-инвойс, edit-им сообщение в «Счёт создан»
+// с URL-кнопкой «💳 Оплатить» + «◀️ Назад к устройствам» + «❌ Отмена».
+func (h *TelegramBotHandler) handleBuyConfirm(ctx context.Context, callback *CallbackQuery, planID, maxDevices int32) {
+	if h.paymentClient == nil || callback.Message == nil {
+		h.answerCallback(ctx, callback.ID, "❌ Платежи недоступны", true)
+		return
+	}
+	if planID <= 0 || maxDevices <= 0 {
+		h.answerCallback(ctx, callback.ID, "❌ Некорректные параметры", true)
+		return
+	}
+
 	telegramID := callback.From.ID
 	userID, registered, err := h.resolveUserIDForBot(ctx, telegramID)
 	if err != nil {
-		h.logger.Error("buy_quick: resolve user failed",
+		h.logger.Error("buy_confirm: resolve user failed",
 			zap.Int64("tg_id", telegramID), zap.Error(err))
 		h.answerCallback(ctx, callback.ID, "❌ Не удалось создать счёт", true)
 		return
@@ -640,37 +763,43 @@ func (h *TelegramBotHandler) handleBuyQuick(ctx context.Context, callback *Callb
 		return
 	}
 
-	inv, err := h.paymentClient.CreateInvoice(ctx, userID, planID, botBuyDefaultMaxDevices, botBuyDefaultProvider)
+	inv, err := h.paymentClient.CreateInvoice(ctx, userID, planID, maxDevices, botBuyDefaultProvider)
 	if err != nil || inv == nil || inv.InvoiceLink == "" {
-		h.logger.Error("buy_quick: CreateInvoice failed",
+		h.logger.Error("buy_confirm: CreateInvoice failed",
 			zap.Int64("tg_id", telegramID),
 			zap.Int64("user_id", userID),
 			zap.Int32("plan_id", planID),
+			zap.Int32("max_devices", maxDevices),
 			zap.Error(err))
 		h.answerCallback(ctx, callback.ID, "❌ Не удалось создать счёт", true)
 		return
 	}
 
-	priceText := h.lookupPlanPrice(ctx, planID)
-	priceLabel := "оплате"
-	if priceText != "" {
-		priceLabel = "оплате " + priceText + "₽"
+	priceText := h.lookupDevicePrice(ctx, planID, maxDevices)
+	planName := h.lookupPlanName(ctx, planID)
+	header := "💳 <b>Счёт создан</b>"
+	if planName != "" && priceText != "" {
+		header = fmt.Sprintf("💳 <b>%s · %d %s · %s ₽</b>",
+			planName, maxDevices, deviceWord(maxDevices), priceText)
 	}
 	newText := fmt.Sprintf(
-		"💳 <b>Счёт создан</b>\n─────────\n"+
-			"К %s\n⏰ Активен %d минут\n\n"+
+		"%s\n─────────\n"+
+			"⏰ Счёт активен %d минут\n\n"+
 			"После оплаты подписка активируется автоматически.",
-		priceLabel, botInvoiceTTLMinutes,
+		header, botInvoiceTTLMinutes,
 	)
 	payText := "💳 Оплатить"
 	if priceText != "" {
-		payText = fmt.Sprintf("💳 Оплатить %s₽", priceText)
+		payText = fmt.Sprintf("💳 Оплатить %s ₽", priceText)
 	}
 	kb := &telegram.InlineKeyboardMarkup{
-		InlineKeyboard: [][]telegram.InlineKeyboardButton{{
-			{Text: payText, URL: inv.InvoiceLink},
-			{Text: "❌ Отмена", CallbackData: cbCancelInvoice},
-		}},
+		InlineKeyboard: [][]telegram.InlineKeyboardButton{
+			{{Text: payText, URL: inv.InvoiceLink}},
+			{
+				{Text: "◀️ Назад", CallbackData: fmt.Sprintf("%s%d", cbBuyBackDevicesPrefix, planID)},
+				{Text: "❌ Отмена", CallbackData: cbCancelInvoice},
+			},
+		},
 	}
 	if err := h.telegramClient.EditMessageText(ctx, telegram.EditMessageTextParams{
 		ChatID:      callback.Message.Chat.ID,
@@ -679,15 +808,116 @@ func (h *TelegramBotHandler) handleBuyQuick(ctx context.Context, callback *Callb
 		ParseMode:   "HTML",
 		ReplyMarkup: kb,
 	}); err != nil {
-		h.logger.Warn("buy_quick: edit message failed",
+		h.logger.Warn("buy_confirm: edit message failed",
 			zap.Int64("chat_id", callback.Message.Chat.ID), zap.Error(err))
 	}
-	h.logger.Info("buy_quick: invoice created",
+	h.logger.Info("buy_confirm: invoice created",
 		zap.Int64("tg_id", telegramID),
 		zap.Int64("user_id", userID),
 		zap.Int32("plan_id", planID),
+		zap.Int32("max_devices", maxDevices),
 		zap.Int64("payment_id", inv.PaymentId))
 	h.answerCallback(ctx, callback.ID, "Счёт создан", false)
+}
+
+// handleBuyBackToPlans — callback "buy_back_plans". Edit-ит текущее
+// сообщение обратно в список тарифов (тот же что показал handleBuyButton).
+func (h *TelegramBotHandler) handleBuyBackToPlans(ctx context.Context, callback *CallbackQuery) {
+	if callback.Message == nil {
+		h.answerCallback(ctx, callback.ID, "", false)
+		return
+	}
+	if h.subscriptionClient == nil {
+		h.answerCallback(ctx, callback.ID, "❌ Тарифы недоступны", true)
+		return
+	}
+	resp, err := h.subscriptionClient.ListPlans(ctx, true)
+	if err != nil || resp == nil {
+		h.answerCallback(ctx, callback.ID, "❌ Не удалось загрузить тарифы", true)
+		return
+	}
+	plans := filterVisiblePlans(resp.Plans)
+	if len(plans) == 0 {
+		h.answerCallback(ctx, callback.ID, "❌ Тарифы временно недоступны", true)
+		return
+	}
+	text, kb := buildPlansMenu(plans)
+	if err := h.telegramClient.EditMessageText(ctx, telegram.EditMessageTextParams{
+		ChatID:      callback.Message.Chat.ID,
+		MessageID:   callback.Message.MessageID,
+		Text:        text,
+		ParseMode:   "HTML",
+		ReplyMarkup: kb,
+	}); err != nil {
+		h.logger.Warn("buy_back_plans: edit message failed",
+			zap.Int64("chat_id", callback.Message.Chat.ID), zap.Error(err))
+	}
+	h.answerCallback(ctx, callback.ID, "", false)
+}
+
+// lookupPlan возвращает SubscriptionPlan по id (через ListPlans). Не
+// критично для функциональности — для текста (имя/цена). Если упало —
+// возвращаем nil без ошибки наружу, юзер увидит generic-текст.
+func (h *TelegramBotHandler) lookupPlan(ctx context.Context, planID int32) (*subpb.SubscriptionPlan, error) {
+	if h.subscriptionClient == nil {
+		return nil, fmt.Errorf("subscription client not configured")
+	}
+	resp, err := h.subscriptionClient.ListPlans(ctx, true)
+	if err != nil || resp == nil {
+		return nil, err
+	}
+	for _, p := range resp.Plans {
+		if p != nil && p.Id == planID {
+			return p, nil
+		}
+	}
+	return nil, nil
+}
+
+// lookupPlanName — короткая обёртка для текста сообщения.
+func (h *TelegramBotHandler) lookupPlanName(ctx context.Context, planID int32) string {
+	p, err := h.lookupPlan(ctx, planID)
+	if err != nil || p == nil {
+		return ""
+	}
+	return humanDuration(p.DurationDays)
+}
+
+// lookupDevicePrice — цена за выбранный (plan_id, max_devices) для текста
+// сообщения «к оплате X ₽». Через GetDevicePricing — там же где брали
+// цены для кнопок выбора устройств.
+func (h *TelegramBotHandler) lookupDevicePrice(ctx context.Context, planID, maxDevices int32) string {
+	if h.subscriptionClient == nil {
+		return ""
+	}
+	resp, err := h.subscriptionClient.GetDevicePricing(ctx, planID)
+	if err != nil || resp == nil {
+		return ""
+	}
+	for _, p := range resp.Prices {
+		if p != nil && p.MaxDevices == maxDevices {
+			return formatRub(p.Price)
+		}
+	}
+	return ""
+}
+
+// deviceWord — склонение числительного для слова «устройство»:
+// 1, 21, 31 → "устройство", 2-4, 22-24 → "устройства", 5-20, 25-30 → "устройств".
+func deviceWord(n int32) string {
+	mod100 := n % 100
+	mod10 := n % 10
+	if mod100 >= 11 && mod100 <= 14 {
+		return "устройств"
+	}
+	switch mod10 {
+	case 1:
+		return "устройство"
+	case 2, 3, 4:
+		return "устройства"
+	default:
+		return "устройств"
+	}
 }
 
 // lookupPlanPrice достаёт цену плана для текста кнопки/сообщения. Если

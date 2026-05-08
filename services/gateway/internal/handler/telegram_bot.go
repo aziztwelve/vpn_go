@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -465,8 +466,32 @@ func (h *TelegramBotHandler) handleCallback(ctx context.Context, callback *Callb
 			h.handleBuyButton(ctx, callback.Message.Chat.ID, callback.From.ID)
 		}
 	case strings.HasPrefix(callback.Data, cbBuyQuickPrefix):
+		// DEPRECATED: переадресует на новый buy_confirm-flow.
 		h.handleBuyQuick(ctx, callback,
 			strings.TrimPrefix(callback.Data, cbBuyQuickPrefix))
+	case strings.HasPrefix(callback.Data, cbBuyPlanPrefix):
+		h.handleBuyPlan(ctx, callback,
+			strings.TrimPrefix(callback.Data, cbBuyPlanPrefix))
+	case strings.HasPrefix(callback.Data, cbBuyConfirmPrefix):
+		// "<plan_id>_<max_devices>" — парсим обе части.
+		parts := strings.SplitN(strings.TrimPrefix(callback.Data, cbBuyConfirmPrefix), "_", 2)
+		if len(parts) != 2 {
+			h.answerCallback(ctx, callback.ID, "❌ Некорректные параметры", true)
+			break
+		}
+		planID64, err1 := strconv.ParseInt(parts[0], 10, 32)
+		dev64, err2 := strconv.ParseInt(parts[1], 10, 32)
+		if err1 != nil || err2 != nil || planID64 <= 0 || dev64 <= 0 {
+			h.answerCallback(ctx, callback.ID, "❌ Некорректные параметры", true)
+			break
+		}
+		h.handleBuyConfirm(ctx, callback, int32(planID64), int32(dev64))
+	case callback.Data == cbBuyBackPlans:
+		h.handleBuyBackToPlans(ctx, callback)
+	case strings.HasPrefix(callback.Data, cbBuyBackDevicesPrefix):
+		// «◀️ Назад» с invoice → re-render device picker для того же plan_id.
+		h.handleBuyPlan(ctx, callback,
+			strings.TrimPrefix(callback.Data, cbBuyBackDevicesPrefix))
 	case callback.Data == cbCancelInvoice:
 		h.handleCancelInvoice(ctx, callback)
 	default:
