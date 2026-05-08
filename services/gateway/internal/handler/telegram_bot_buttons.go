@@ -112,11 +112,17 @@ const (
 	happStoreWindows = "https://github.com/Happ-proxy/happ-desktop/releases/latest"
 )
 
-// botBuyDefaultProvider — провайдер для quick-buy из бота. wata = рублёвая
-// форма, доступна без Mini App (юзер кликает прямо в TG → открывается URL).
-// Для Stars пришлось бы открывать Mini App.openInvoice(), что в чисто
-// бот-flow не работает.
-const botBuyDefaultProvider = "wata"
+// botBuyDefaultProvider — провайдер для покупки из бота. Должен быть
+// рублёвым с URL-инвойсом (юзер кликает прямо в TG → открывается оплатная
+// страница). Telegram Stars не подходит: для Stars нужен Mini App
+// `openInvoice()`, а в чисто бот-flow его нет.
+//
+// На проде сейчас включён `platega` (см. payment-service WATA_ENABLED /
+// PLATEGA_ENABLED). Если в будущем дефолт сменится — поправить здесь
+// и/или вытащить в env BOT_BUY_PROVIDER. Имя провайдера должно совпадать
+// с тем, под которым он зарегистрирован в payment-service (см. service/
+// payment.go register loop).
+const botBuyDefaultProvider = "platega"
 
 // botBuyDefaultMaxDevices — для quick-buy фиксируем 2 устройства (как в
 // карточке Mini App.plans базовый вариант). Изменение per-device count —
