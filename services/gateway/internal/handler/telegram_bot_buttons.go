@@ -207,8 +207,7 @@ func (h *TelegramBotHandler) buildPostStartText(ctx context.Context, userID, tel
 	subURL := fmt.Sprintf("%s/api/v1/subscription/%s", baseURL, tok.SubscriptionToken)
 
 	return fmt.Sprintf(
-		"🔑 <b>Твой VPN-ключ</b>\n"+
-			"─────────\n"+
+		"Твой VPN-ключ\n"+
 			"<code>%s</code>\n"+
 			"<i>Тапни по ссылке выше, чтобы скопировать.</i>\n\n"+
 			"Подключись через Happ/INCY...",
