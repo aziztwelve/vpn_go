@@ -37,6 +37,11 @@ func (h *SubscriptionHandler) ListPlans(w http.ResponseWriter, r *http.Request) 
 	plans := make([]map[string]interface{}, 0, len(resp.Plans))
 	for _, plan := range resp.Plans {
 		if plan.Id == 100 && uid != 13 && uid != 18 { continue } // тест-план 3₽ — aziztwelve (id=13), mans_lll (id=18)
+		// План 101 — промо «79₽/мес», раздаётся ТОЛЬКО через bot-команду
+		// /promo @user (см. handler/telegram_bot_promo.go) одноразовыми
+		// токенами /promo/p/<token>. В публичном /plans не показываем
+		// никогда (даже для админов), чтобы не путать UI.
+		if plan.Id == 101 { continue }
 		plans = append(plans, map[string]interface{}{
 			"id":            plan.Id,
 			"name":          plan.Name,

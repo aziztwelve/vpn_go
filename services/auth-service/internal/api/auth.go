@@ -2,8 +2,10 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/vpn/auth-service/internal/model"
 	"github.com/vpn/auth-service/internal/service"
 	pb "github.com/vpn/shared/pkg/proto/auth/v1"
@@ -56,6 +58,29 @@ func (a *AuthAPI) GetUser(ctx context.Context, req *pb.GetUserRequest) (*pb.GetU
 	}
 
 	return &pb.GetUserResponse{
+		User: modelUserToProto(user),
+	}, nil
+}
+
+// GetUserByTelegramID — gateway-handler'ы бота знают telegram_id из webhook'а,
+// но subscription/payment-сервисам нужен внутренний users.id. Маппим pgx.ErrNoRows
+// в codes.NotFound, чтобы вызывающая сторона могла отличить «юзер не зарегистрирован»
+// (ожидаемо для бот-команд до открытия Mini App) от настоящих ошибок.
+func (a *AuthAPI) GetUserByTelegramID(ctx context.Context, req *pb.GetUserByTelegramIDRequest) (*pb.GetUserByTelegramIDResponse, error) {
+	if req.TelegramId == 0 {
+		return nil, status.Error(codes.InvalidArgument, "telegram_id is required")
+	}
+
+	user, err := a.authService.GetUserByTelegramID(ctx, req.TelegramId)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, status.Error(codes.NotFound, "user not found")
+		}
+		a.logger.Error("Failed to get user by telegram_id", zap.Int64("telegram_id", req.TelegramId), zap.Error(err))
+		return nil, status.Error(codes.Internal, "failed to get user")
+	}
+
+	return &pb.GetUserByTelegramIDResponse{
 		User: modelUserToProto(user),
 	}, nil
 }
@@ -215,6 +240,37 @@ func (a *AuthAPI) SetPendingCampaign(ctx context.Context, req *pb.SetPendingCamp
 		zap.Int64("campaign_id", campaignID),
 	)
 	return &pb.SetPendingCampaignResponse{Stored: true, CampaignId: campaignID}, nil
+}
+
+// RegisterFromBot — full-init юзера прямо из webhook'а бота при /start.
+// Аналог ValidateTelegramUser, но без initData/JWT (бот их не имеет/не нужен).
+//
+// Идемпотентен: повторные /start от того же telegram_id не создают дубликатов.
+// Атрибуция (ref/campaign) делается синхронно и только для НОВЫХ юзеров.
+func (a *AuthAPI) RegisterFromBot(ctx context.Context, req *pb.RegisterFromBotRequest) (*pb.RegisterFromBotResponse, error) {
+	if req.TelegramId <= 0 {
+		return nil, status.Error(codes.InvalidArgument, "telegram_id is required")
+	}
+	res, err := a.authService.RegisterFromBot(
+		ctx,
+		req.TelegramId,
+		req.Username,
+		req.FirstName,
+		req.LastName,
+		req.LanguageCode,
+		req.StartParam,
+	)
+	if err != nil {
+		a.logger.Error("RegisterFromBot failed",
+			zap.Int64("telegram_id", req.TelegramId), zap.Error(err))
+		return nil, status.Error(codes.Internal, "failed to register from bot")
+	}
+	return &pb.RegisterFromBotResponse{
+		User:                 modelUserToProto(res.User),
+		IsNewUser:            res.IsNewUser,
+		ReferralRegistered:   res.ReferralRegistered,
+		AttributedCampaignId: res.AttributedCampaignID,
+	}, nil
 }
 
 func (a *AuthAPI) VerifyToken(ctx context.Context, req *pb.VerifyTokenRequest) (*pb.VerifyTokenResponse, error) {

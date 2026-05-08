@@ -147,6 +147,13 @@ func (a *App) Start() error {
 	// Health check
 	router.Get("/health", handler.HealthCheck)
 
+	// Промо-ссылка из бот-команды /promo @user. Публичный URL вида
+	// https://cdn.osmonai.com/promo/p/<token>. Алгоритм:
+	// Redeem → CreateInvoice (Platega) → 302 → Platega payment URL.
+	// Регистрируется ВНЕ /api/v1, потому что юзер кликает прямо в TG —
+	// /api/v1/promo выглядел бы технически.
+	// promoHandler конструируется ниже (после paymentClient/authClient).
+
 	// Handlers
 	authHandler := handler.NewAuthHandler(a.authClient, a.subscriptionClient, a.vpnClient, a.logger)
 	subscriptionHandler := handler.NewSubscriptionHandler(a.subscriptionClient, a.logger)
@@ -160,7 +167,13 @@ func (a *App) Start() error {
 	// (BroadcastService живёт в auth-service бинарнике).
 	telegramClient := telegram.New(a.config.Telegram.BotToken)
 	broadcastClient := client.NewBroadcastClient(a.authClient.Conn(), a.logger)
-	telegramBotHandler := handler.NewTelegramBotHandler(telegramClient, a.subscriptionClient, a.authClient, broadcastClient, a.logger, a.config.Telegram.ChannelUsername)
+	// PromoClient так же переиспользует grpc-conn от authClient (PromoService
+	// живёт в auth-service бинарнике, общая БД с broadcast'ом).
+	promoClient := client.NewPromoClient(a.authClient.Conn(), a.logger)
+	promoHandler := handler.NewPromoHandler(promoClient, a.paymentClient, a.logger)
+	// Регистрируем публичный /promo/p/{token} здесь — на root-роутере, без /api/v1.
+	router.Get("/promo/p/{token}", promoHandler.Redeem)
+	telegramBotHandler := handler.NewTelegramBotHandler(telegramClient, a.subscriptionClient, a.authClient, broadcastClient, promoClient, a.paymentClient, a.vpnClient, a.logger, a.config.Telegram.ChannelUsername)
 
 	// JWT middleware для защищённых ручек. Секрет — общий с Auth Service.
 	jwtMiddleware := authmw.JWTMiddleware(a.config.JWT.Secret)

@@ -15,6 +15,7 @@ import (
 	"github.com/vpn/platform/pkg/telegram"
 	pb "github.com/vpn/shared/pkg/proto/auth/v1"
 	broadcastpb "github.com/vpn/shared/pkg/proto/broadcast/v1"
+	promopb "github.com/vpn/shared/pkg/proto/promo/v1"
 	referralpb "github.com/vpn/shared/pkg/proto/referral/v1"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -171,10 +172,15 @@ func (a *App) initGRPC() error {
 	authAPI := api.NewAuthAPI(authService, a.logger)
 	broadcastAPI := api.NewBroadcastAPI(a.broadcastRepo, a.broadcastSender, a.logger)
 
+	// PromoAPI делит БД с broadcast'ом — используем общий репо для admin-checks.
+	promoRepo := repository.NewPromoRepository(a.db)
+	promoAPI := api.NewPromoAPI(promoRepo, a.broadcastRepo, a.logger)
+
 	// Create gRPC server
 	a.grpcServer = grpc.NewServer()
 	pb.RegisterAuthServiceServer(a.grpcServer, authAPI)
 	broadcastpb.RegisterBroadcastServiceServer(a.grpcServer, broadcastAPI)
+	promopb.RegisterPromoServiceServer(a.grpcServer, promoAPI)
 	reflection.Register(a.grpcServer)
 
 	// gRPC Health (gRPC Health v1) — пинг БД для readiness-проверки.

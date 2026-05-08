@@ -10,6 +10,12 @@ service AuthService {
   
   // Получение информации о пользователе
   rpc GetUser(GetUserRequest) returns (GetUserResponse);
+
+  // Получение пользователя по telegram_id (для бот-handler'ов в gateway,
+  // которые знают только telegram_id из webhook'а Telegram, но другим
+  // сервисам — payment, subscription — нужен внутренний users.id).
+  // Возвращает NotFound если юзер с таким telegram_id не зарегистрирован.
+  rpc GetUserByTelegramID(GetUserByTelegramIDRequest) returns (GetUserByTelegramIDResponse);
   
   // Обновление роли пользователя (только для админов)
   rpc UpdateUserRole(UpdateUserRoleRequest) returns (UpdateUserRoleResponse);
@@ -44,6 +50,20 @@ service AuthService {
   // /start src_<slug>. Upsert: последний clicker побеждает.
   // Если slug не найден или кампания архивирована — возвращает stored=false.
   rpc SetPendingCampaign(SetPendingCampaignRequest) returns (SetPendingCampaignResponse);
+
+  // Регистрация юзера прямо из webhook'а бота при /start. Полный аналог
+  // ValidateTelegramUser (upsert users + ref/campaign атрибуция), но без
+  // initData/JWT — данные приходят из Telegram update'а в боте, а JWT
+  // боту не нужен (Mini App сам сгенерит свой при первом ValidateTelegramUser).
+  //
+  // start_param парсится здесь же:
+  //   "ref_<token>" → если юзер новый, регистрируем реферал синхронно
+  //   "src_<slug>"  → если юзер новый, атрибутируем к кампании синхронно
+  //
+  // Идемпотентно по telegram_id: повторные /start не создают дубликатов
+  // и не переатрибутируют существующих юзеров (first-touch wins).
+  // Возвращает users.id чтобы gateway мог сразу дёрнуть StartTrial+CreateVPNUser.
+  rpc RegisterFromBot(RegisterFromBotRequest) returns (RegisterFromBotResponse);
 }
 
 message ValidateTelegramUserRequest {
@@ -67,6 +87,14 @@ message GetUserRequest {
 }
 
 message GetUserResponse {
+  User user = 1;
+}
+
+message GetUserByTelegramIDRequest {
+  int64 telegram_id = 1;
+}
+
+message GetUserByTelegramIDResponse {
   User user = 1;
 }
 
@@ -139,6 +167,22 @@ message SetPendingCampaignRequest {
 message SetPendingCampaignResponse {
   bool   stored      = 1;
   int64  campaign_id = 2; // 0 если slug не найден / кампания архивирована
+}
+
+message RegisterFromBotRequest {
+  int64  telegram_id   = 1;
+  string username      = 2;
+  string first_name    = 3;
+  string last_name     = 4;
+  string language_code = 5;
+  string start_param   = 6; // raw param из /start (например "ref_<token>" / "src_<slug>" / "")
+}
+
+message RegisterFromBotResponse {
+  User  user                 = 1;
+  bool  is_new_user           = 2; // true если юзер был создан только что (для trial-активации в Gateway)
+  bool  referral_registered   = 3; // true если start_param=ref_X и реферал успешно зарегистрирован
+  int64 attributed_campaign_id = 4; // >0 если start_param=src_Y и атрибуция к кампании прошла
 }
 
 message User {

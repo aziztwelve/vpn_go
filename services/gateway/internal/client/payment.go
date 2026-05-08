@@ -28,6 +28,9 @@ func NewPaymentClient(addr string, logger *zap.Logger) (*PaymentClient, error) {
 	}, nil
 }
 
+// Conn returns the underlying gRPC connection (for health checks).
+func (c *PaymentClient) Conn() *grpc.ClientConn { return c.conn }
+
 func (c *PaymentClient) Close() error {
 	return c.conn.Close()
 }

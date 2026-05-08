@@ -140,7 +140,14 @@ func (h *SubscriptionConfigHandler) serve(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Profile-Title", profileTitle)
 	w.Header().Set("Content-Disposition", "attachment; filename="+filename)
 	w.Header().Set("Support-URL", "https://t.me/maydavpn_support")
-	w.Header().Set("Profile-Web-Page-URL", "https://cdn.osmonai.com")
+	// Profile-Web-Page-URL — куда HAPP/Hiddify отправят юзера по кнопке
+	// «Profile / Manage subscription». Должен совпадать с тем хостом,
+	// откуда пришёл сам подписочный запрос: юзер на `s.osmonai.com`
+	// (RU-mirror) → кнопка ведёт на `s.osmonai.com`, юзер на cdn — на cdn.
+	// Поэтому используем resolveRequestBaseURL, а НЕ resolvePublicBaseURL —
+	// последний навязывает единый PUBLIC_BASE_URL и сломает связку для
+	// клиентов, которые специально подписались через RU-зеркало.
+	w.Header().Set("Profile-Web-Page-URL", resolveRequestBaseURL(r))
 	// Happ всегда создаёт `freedom` outbound с тегом `fragment` — читает значения
 	// из этих заголовков и подставляет в Xray config как `fragment.length/packets/interval`.
 	// Xray требует ОДИН диапазон "start-end" (или одно число / "tlshello"), список

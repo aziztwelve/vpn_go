@@ -12,6 +12,7 @@ import (
 	"github.com/vpn/payment-service/internal/provider"
 	"github.com/vpn/payment-service/internal/repository"
 	authpb "github.com/vpn/shared/pkg/proto/auth/v1"
+	promopb "github.com/vpn/shared/pkg/proto/promo/v1"
 	referralpb "github.com/vpn/shared/pkg/proto/referral/v1"
 	subpb "github.com/vpn/shared/pkg/proto/subscription/v1"
 	vpnpb "github.com/vpn/shared/pkg/proto/vpn/v1"
@@ -23,6 +24,16 @@ import (
 // (referral не подключён) — тогда хук молча пропускается.
 type ReferralClient interface {
 	ApplyBonus(ctx context.Context, req *referralpb.ApplyBonusRequest, opts ...grpc.CallOption) (*referralpb.ApplyBonusResponse, error)
+}
+
+// PromoClient — узкий интерфейс к auth-service.PromoService для отметки
+// использования промо-токена после успешной оплаты. Может быть nil
+// (PROMO_SERVICE_ADDR не задан) — тогда хук молча пропускается.
+//
+// Контракт: MarkUsed по payment_id. matched=false если payment не связан
+// с промо (обычная оплата) — это OK, не ошибка.
+type PromoClient interface {
+	MarkUsed(ctx context.Context, req *promopb.MarkUsedRequest, opts ...grpc.CallOption) (*promopb.MarkUsedResponse, error)
 }
 
 // ErrInvalidPlan — не нашли такой (plan_id, max_devices) в device_addon_pricing.
@@ -46,6 +57,7 @@ type PaymentService struct {
 	vpn       vpnpb.VPNServiceClient
 	auth      authpb.AuthServiceClient // только для user_id → telegram_id перед NotifyPaid
 	referral  ReferralClient           // nil если referral-service не подключён
+	promo     PromoClient              // nil если PromoService не подключён — MarkUsed-хук пропускается
 	notifier  *notifier.Telegram       // nil если бот не настроен — тогда уведомления не шлём
 	log       *zap.Logger
 }
@@ -54,6 +66,9 @@ type PaymentService struct {
 //
 // notifier — опциональный nil; если задан, после успешной активации
 // подписки юзеру улетает push-сообщение в чат с ботом.
+// promoClient — опциональный nil; если задан, после успешной активации
+// мы дёргаем PromoService.MarkUsed(payment_id) (если payment связан с
+// промо-токеном — поставит used_at=NOW()).
 func New(
 	repo *repository.PaymentRepository,
 	providers []provider.PaymentProvider,
@@ -61,6 +76,7 @@ func New(
 	vpn vpnpb.VPNServiceClient,
 	auth authpb.AuthServiceClient,
 	referral ReferralClient,
+	promoClient PromoClient,
 	tgNotifier *notifier.Telegram,
 	log *zap.Logger,
 ) *PaymentService {
@@ -78,6 +94,7 @@ func New(
 		vpn:       vpn,
 		auth:      auth,
 		referral:  referral,
+		promo:     promoClient,
 		notifier:  tgNotifier,
 		log:       log,
 	}
@@ -389,6 +406,31 @@ func (s *PaymentService) handleSuccessfulPayment(ctx context.Context, event *pro
 		zap.Int64("subscription_id", subscriptionID),
 		zap.String("vpn_uuid", vpnResp.GetVpnUser().GetUuid()),
 	)
+
+	// Промо-хук — best-effort: помечаем promo_codes.used_at если payment
+	// был привязан к токену через AttachPayment в gateway (см. handler/promo.go).
+	// Запускаем в горутине с собственным контекстом — webhook handler не
+	// должен ждать отдельный RPC к auth-service. matched=false (обычная
+	// оплата без промо) — это OK, не ошибка.
+	if s.promo != nil {
+		go func(paymentID int64) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			resp, err := s.promo.MarkUsed(ctx, &promopb.MarkUsedRequest{PaymentId: paymentID})
+			if err != nil {
+				s.log.Warn("promo.MarkUsed failed (non-blocking)",
+					zap.Int64("payment_id", paymentID), zap.Error(err))
+				return
+			}
+			if resp.Matched {
+				s.log.Info("promo marked used",
+					zap.Int64("payment_id", paymentID),
+					zap.Int64("promo_id", resp.PromoId),
+					zap.Int64("user_id", resp.UserId),
+				)
+			}
+		}(payment.ID)
+	}
 
 	// Реферальный хук — best-effort. Если у юзера есть inviter, начислит
 	// партнёрский % на баланс. Идемпотентно по payment_id (UNIQUE на

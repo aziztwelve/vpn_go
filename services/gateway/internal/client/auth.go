@@ -51,6 +51,17 @@ func (c *AuthClient) GetUser(ctx context.Context, userID int64) (*pb.GetUserResp
 	})
 }
 
+// GetUserByTelegramID — обратный поиск users.id по telegram_id. Нужен в
+// бот-обработчиках: из webhook'а Telegram приходит только telegram_id (поле
+// callback.From.ID / message.From.ID), а subscription/payment-сервисам требуется
+// внутренний users.id. Если юзер ещё не открыл Mini App — auth-service вернёт
+// codes.NotFound (см. AuthAPI.GetUserByTelegramID).
+func (c *AuthClient) GetUserByTelegramID(ctx context.Context, telegramID int64) (*pb.GetUserByTelegramIDResponse, error) {
+	return c.client.GetUserByTelegramID(ctx, &pb.GetUserByTelegramIDRequest{
+		TelegramId: telegramID,
+	})
+}
+
 func (c *AuthClient) VerifyToken(ctx context.Context, token string) (*pb.VerifyTokenResponse, error) {
 	return c.client.VerifyToken(ctx, &pb.VerifyTokenRequest{
 		Token: token,
@@ -107,4 +118,22 @@ func (c *AuthClient) SetPendingCampaign(ctx context.Context, telegramID int64, s
 		return 0, err
 	}
 	return resp.CampaignId, nil
+}
+
+// RegisterFromBot — полная инициализация юзера прямо из webhook'а бота при
+// /start. Аналог ValidateTelegramUser (Mini App), но без initData/JWT.
+// Создаёт юзера + обрабатывает ref_/src_ синхронно. Идемпотентно.
+func (c *AuthClient) RegisterFromBot(
+	ctx context.Context,
+	telegramID int64,
+	username, firstName, lastName, languageCode, startParam string,
+) (*pb.RegisterFromBotResponse, error) {
+	return c.client.RegisterFromBot(ctx, &pb.RegisterFromBotRequest{
+		TelegramId:   telegramID,
+		Username:     username,
+		FirstName:    firstName,
+		LastName:     lastName,
+		LanguageCode: languageCode,
+		StartParam:   startParam,
+	})
 }

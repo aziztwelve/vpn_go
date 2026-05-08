@@ -466,6 +466,30 @@ tasks:
         T="$AUTH_TELEGRAM_BOT_TOKEN"
         curl -s "https://api.telegram.org/bot$T/deleteWebhook" | python3 -m json.tool
 
+  # ==================== STATS / MONITORING ====================
+
+  stats:
+    desc: "On-demand сводка: юзеры, подписки, активность, серверы, топ-юзеры по трафику"
+    cmds:
+      - ./deploy/scripts/stats.sh
+
+  stats:json:
+    desc: "Та же сводка в JSON (для скриптов / алертов)"
+    cmds:
+      - ./deploy/scripts/stats.sh --json
+
+  cascade:watch:
+    desc: "Состояние каскадных серверов (relay→exit): TCP probe, RTT, xray, юзеры, трафик"
+    cmds:
+      - ./deploy/scripts/cascade-watch.sh
+
+  cascade:watch:alert:
+    desc: "Cascade-watch с порогом адопшена (exit 2 если за 24ч юзеров < THRESHOLD). Использовать в cron."
+    vars:
+      THRESHOLD: '{{.THRESHOLD | default "5"}}'
+    cmds:
+      - ./deploy/scripts/cascade-watch.sh --threshold {{.THRESHOLD}}
+
   # ==================== UTIL ====================
 
   clean:

@@ -1,0 +1,20 @@
+name: vpn-stack
+
+# RU-mirror override: публикует gateway на WG-IP 10.13.13.1:8081, чтобы
+# Caddy на RU-VPS (s.osmonai.com) мог проксировать /api/v1/subscription/*
+# через WireGuard-туннель в FI-gateway.
+#
+# Накатывается ПОВЕРХ docker-compose.yml (и --profile prod):
+#   docker compose \
+#     -f deploy/compose/docker-compose.yml \
+#     -f deploy/compose/docker-compose.ru-mirror.yml \
+#     --env-file deploy/env/.env --profile prod \
+#     up -d gateway
+#
+# Слушает только на WG-интерфейсе, не на 0.0.0.0 — снаружи (RU/CF) попасть
+# на 8081 нельзя, только через wg0.
+
+services:
+  gateway:
+    ports:
+      - "10.13.13.1:${GATEWAY_HTTP_PORT}:${GATEWAY_HTTP_PORT}"

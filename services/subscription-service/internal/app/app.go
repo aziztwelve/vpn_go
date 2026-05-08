@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/vpn/platform/pkg/closer"
+	grpchealth "github.com/vpn/platform/pkg/grpc/health"
 	"github.com/vpn/subscription-service/internal/api"
 	"github.com/vpn/subscription-service/internal/config"
 	"github.com/vpn/subscription-service/internal/repository"
@@ -97,6 +98,11 @@ func (a *App) initGRPC() error {
 	a.grpcServer = grpc.NewServer()
 	pb.RegisterSubscriptionServiceServer(a.grpcServer, subscriptionAPI)
 	reflection.Register(a.grpcServer)
+
+	// gRPC Health (gRPC Health v1) — пинг БД для readiness-проверки.
+	grpchealth.RegisterServiceWithChecks(a.grpcServer, func(ctx context.Context) error {
+		return a.db.Ping(ctx)
+	})
 
 	a.closer.Add(func(ctx context.Context) error {
 		a.grpcServer.GracefulStop()

@@ -19,8 +19,10 @@ import (
 	"github.com/vpn/payment-service/internal/sentinel"
 	"github.com/vpn/payment-service/internal/service"
 	"github.com/vpn/platform/pkg/closer"
+	grpchealth "github.com/vpn/platform/pkg/grpc/health"
 	authpb "github.com/vpn/shared/pkg/proto/auth/v1"
 	pb "github.com/vpn/shared/pkg/proto/payment/v1"
+	promopb "github.com/vpn/shared/pkg/proto/promo/v1"
 	referralpb "github.com/vpn/shared/pkg/proto/referral/v1"
 	subpb "github.com/vpn/shared/pkg/proto/subscription/v1"
 	vpnpb "github.com/vpn/shared/pkg/proto/vpn/v1"
@@ -115,6 +117,11 @@ func (a *App) initGRPC() error {
 	a.authConn = authConn
 	a.closer.Add(func(ctx context.Context) error { return authConn.Close() })
 
+	// PromoService живёт в auth-service бинарнике (общая БД с broadcast),
+	// поэтому переиспользуем authConn — отдельный коннект не нужен.
+	// Если в будущем PromoService переедет — поменять на отдельный addr.
+	promoClient := promopb.NewPromoServiceClient(authConn)
+
 	// referral-service — опциональный. Если адрес не задан, реферальный хук
 	// не вызывается, partner-комиссия не начисляется.
 	var referralClient service.ReferralClient
@@ -152,6 +159,7 @@ func (a *App) initGRPC() error {
 		vpnpb.NewVPNServiceClient(vpnConn),
 		authpb.NewAuthServiceClient(authConn),
 		referralClient,
+		promoClient,
 		tgNotifier,
 		a.logger,
 	)
@@ -171,6 +179,11 @@ func (a *App) initGRPC() error {
 	a.grpcServer = grpc.NewServer()
 	pb.RegisterPaymentServiceServer(a.grpcServer, paymentAPI)
 	reflection.Register(a.grpcServer)
+
+	// gRPC Health (gRPC Health v1) — пинг БД для readiness-проверки.
+	grpchealth.RegisterServiceWithChecks(a.grpcServer, func(ctx context.Context) error {
+		return a.db.Ping(ctx)
+	})
 
 	addr := fmt.Sprintf("%s:%d", a.config.GRPC.Host, a.config.GRPC.Port)
 	a.logger.Info("gRPC server initialized", zap.String("addr", addr))

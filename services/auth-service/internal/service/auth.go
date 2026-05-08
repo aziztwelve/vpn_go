@@ -378,6 +378,13 @@ func (s *AuthService) GetUser(ctx context.Context, userID int64) (*model.User, e
 	return s.userRepo.GetUserByID(ctx, userID)
 }
 
+// GetUserByTelegramID — получает пользователя по telegram_id. Используется
+// gateway'ем в бот-обработчиках, где из webhook'а Telegram известен только
+// telegram_id, а внутренним сервисам (subscription, payment) нужен users.id.
+func (s *AuthService) GetUserByTelegramID(ctx context.Context, telegramID int64) (*model.User, error) {
+	return s.userRepo.GetUserByTelegramID(ctx, telegramID)
+}
+
 // UpdateUserRole обновляет роль пользователя
 func (s *AuthService) UpdateUserRole(ctx context.Context, userID int64, role string) (*model.User, error) {
 	return s.userRepo.UpdateUserRole(ctx, userID, role)
@@ -390,12 +397,37 @@ func (s *AuthService) UpdateUserRole(ctx context.Context, userID int64, role str
 // Запрещено:
 //   - role='admin' (admin выдаёт только сам админ через UpdateUserRole)
 //   - userID == 0 (gateway проставляет из JWT)
+//
+// Admin-защита: если текущий юзер — admin, self-service никогда не
+// downgrade'ит его до 'user'/'partner'. Фронт дёргает этот endpoint
+// на вход в партнёрский/реферальный кабинет — у админа при этом нельзя
+// терять роль, иначе он теряет доступ к admin-функциям. Возвращаем
+// юзера как есть + свежий JWT с реальной (admin) ролью, без ошибки —
+// UX фронта остаётся консистентным (кнопка "стать партнёром" просто
+// не даёт эффекта для админа).
 func (s *AuthService) SelfUpdateRole(ctx context.Context, userID int64, role string) (*model.User, string, error) {
 	if userID == 0 {
 		return nil, "", fmt.Errorf("user_id is required")
 	}
 	if role != "user" && role != "partner" {
 		return nil, "", fmt.Errorf("role must be 'user' or 'partner', got %q", role)
+	}
+
+	// Проверяем текущую роль — админов не трогаем.
+	current, err := s.userRepo.GetUserByID(ctx, userID)
+	if err != nil {
+		return nil, "", fmt.Errorf("lookup user: %w", err)
+	}
+	if current.Role == "admin" {
+		s.logger.Info("SelfUpdateRole: preserving admin role",
+			zap.Int64("user_id", userID),
+			zap.String("requested_role", role),
+		)
+		token, err := s.GenerateJWT(current.ID, current.Role)
+		if err != nil {
+			return nil, "", fmt.Errorf("generate JWT: %w", err)
+		}
+		return current, token, nil
 	}
 
 	user, err := s.userRepo.UpdateUserRole(ctx, userID, role)
@@ -433,6 +465,11 @@ func (s *AuthService) SetPendingReferral(ctx context.Context, telegramID int64, 
 // должны парсить одинаково. Изменение только в одном месте — баг.
 const CampaignSrcStartPrefix = "src_"
 
+// RefStartPrefix — префикс start-параметра для реферальной ссылки. Дублируется
+// с handler/telegram_bot.go в gateway, т.к. один сервис не должен зависеть от
+// другого. Парсинг идентичен.
+const RefStartPrefix = "ref_"
+
 // RecordBotStart фиксирует факт нажатия /start в боте (воронка бот → Mini App).
 // Возвращает stored=true только при первом нажатии (повторные /start от того
 // же telegram_id игнорируются — started_at не сдвигается).
@@ -466,6 +503,109 @@ func (s *AuthService) RecordBotStart(ctx context.Context, telegramID int64, user
 
 	stored, err = s.userRepo.InsertBotStart(ctx, telegramID, username, firstName, startParam, campaignID)
 	return stored, campaignID, err
+}
+
+// RegisterFromBotResult — результат RegisterFromBot.
+type RegisterFromBotResult struct {
+	User                  *model.User
+	IsNewUser             bool
+	ReferralRegistered    bool
+	AttributedCampaignID  int64
+}
+
+// RegisterFromBot выполняет полную инициализацию юзера из webhook'а бота при
+// /start. Аналог ValidateTelegramUser, но без initData и JWT — данные приходят
+// прямо из Telegram update'а, а JWT боту не нужен (Mini App сам генерит свой).
+//
+// Делает синхронно:
+//  1. Upsert users (CreateUser если нет, иначе обновляем username/first_name/...)
+//  2. UpdateLastActive
+//  3. Если start_param=ref_<token> и юзер новый — registerReferral (best-effort)
+//  4. Если start_param=src_<slug>  и юзер новый — InsertUserAttribution (best-effort)
+//
+// Идемпотентно: повторные /start'ы от того же telegram_id не создают дубликатов
+// и НЕ переатрибутируют существующих юзеров (first-touch wins для ref/campaign).
+//
+// Best-effort на ref/campaign шагах: если они падают — юзер всё равно создан
+// и возвращается. Обработать ошибки атрибуции отдельно нет смысла (старая
+// схема через PendingReferral/PendingCampaign так же делает).
+func (s *AuthService) RegisterFromBot(
+	ctx context.Context,
+	telegramID int64,
+	username, firstName, lastName, languageCode, startParam string,
+) (*RegisterFromBotResult, error) {
+	if telegramID <= 0 {
+		return nil, fmt.Errorf("invalid telegram_id")
+	}
+
+	// 1. Upsert users.
+	isNewUser := false
+	user, err := s.userRepo.GetUserByTelegramID(ctx, telegramID)
+	if err != nil {
+		// Юзера нет — создаём. photo_url у нас в боте отсутствует (есть только
+		// при initData в Mini App), так что передаём пустую строку — UpdateUser
+		// потом обновит при первом ValidateTelegramUser.
+		user, err = s.userRepo.CreateUser(ctx, telegramID, username, firstName, lastName, "", languageCode)
+		if err != nil {
+			return nil, fmt.Errorf("create user from bot: %w", err)
+		}
+		isNewUser = true
+		s.logger.Info("New user created via /start",
+			zap.Int64("telegram_id", telegramID),
+			zap.String("username", username),
+		)
+	} else {
+		// Юзер уже есть — обновим текстовые поля. photo_url не трогаем (его
+		// нет в bot update'е, перезатрём пустотой = плохо).
+		user.Username = username
+		user.FirstName = firstName
+		user.LastName = lastName
+		if languageCode != "" {
+			user.LanguageCode = languageCode
+		}
+		if err := s.userRepo.UpdateUser(ctx, user); err != nil {
+			s.logger.Warn("UpdateUser failed in RegisterFromBot (non-blocking)",
+				zap.Int64("telegram_id", telegramID), zap.Error(err))
+		}
+	}
+
+	// 2. last_active_at — best-effort.
+	_ = s.userRepo.UpdateLastActive(ctx, user.ID)
+
+	// 3+4. Атрибуция — только для НОВЫХ юзеров (first-touch wins).
+	res := &RegisterFromBotResult{User: user, IsNewUser: isNewUser}
+	if !isNewUser {
+		return res, nil
+	}
+
+	switch {
+	case strings.HasPrefix(startParam, RefStartPrefix):
+		token := strings.TrimPrefix(startParam, RefStartPrefix)
+		if token != "" && s.referral != nil {
+			res.ReferralRegistered = s.tryRegisterReferral(ctx, token, user.ID)
+		}
+
+	case strings.HasPrefix(startParam, CampaignSrcStartPrefix):
+		slug := strings.TrimPrefix(startParam, CampaignSrcStartPrefix)
+		if slug != "" {
+			id, found, lookupErr := s.userRepo.ResolveCampaignBySlug(ctx, slug)
+			if lookupErr != nil {
+				s.logger.Warn("ResolveCampaignBySlug failed in RegisterFromBot (non-blocking)",
+					zap.Int64("telegram_id", telegramID), zap.String("slug", slug), zap.Error(lookupErr))
+			} else if found {
+				if _, err := s.userRepo.InsertUserAttribution(ctx, user.ID, id); err != nil {
+					s.logger.Warn("InsertUserAttribution failed in RegisterFromBot (non-blocking)",
+						zap.Int64("user_id", user.ID), zap.Int64("campaign_id", id), zap.Error(err))
+				} else {
+					res.AttributedCampaignID = id
+					s.logger.Info("user attributed to campaign via /start",
+						zap.Int64("user_id", user.ID), zap.Int64("campaign_id", id))
+				}
+			}
+		}
+	}
+
+	return res, nil
 }
 
 // SetPendingCampaign сохраняет связь telegram_id → campaign_id ДО того как

@@ -333,17 +333,19 @@ func (s *BroadcastSender) Send(ctx context.Context, broadcastID int64) error {
 
 Auth middleware: `users.role = 'admin'`. Список admin-telegram-id из конфига — cross-check с `admin_telegram_ids` как гарантия.
 
-### Stage 5 — Telegram bot commands
+### Stage 5 — Telegram bot commands ✅
 
-Расширить `services/gateway/internal/handler/telegram_bot.go`:
+Реализовано в `services/gateway/internal/handler/telegram_bot.go` (формат-helper'ы покрыты тестами в `telegram_bot_admin_test.go`).
 
-- `/admin` — показывает меню с pending drafts и счётчиками.
-- `/approve_<id>` — approve draft, sender запускается в goroutine.
-- `/cancel_<id>` — отмена.
-- `/broadcast_stats <id>` — статы по отправке.
-- Callback-кнопки в notify-сообщении с draft-превью: `bc_approve_<id>`, `bc_cancel_<id>`.
+- `/admin` — список pending drafts с командами для каждого + сводка по последним 5 любого статуса.
+- `/approve_<id>` — approve draft (clickable underscore-форма Telegram).
+- `/cancel_<id>` — отмена (только для status='draft').
+- `/broadcast_stats <id>` и `/broadcast_stats_<id>` — детали + Stats (sent/blocked/failed/opened/clicked).
+- Callback-кнопки в notify-сообщении с draft-превью: `bc_approve_<id>`, `bc_cancel_<id>` (Stage 3).
 
-Все команды только для юзеров с `role='admin'`.
+Все команды дёргают тот же `BroadcastService` через gRPC что и HTTP-админка (Stage 4). Авторизация: `Auth.admin_telegram_id = msg.From.ID`, auth-service сверяет `users.role='admin'`. Не-админы получают `PermissionDenied` → бот молча игнорит (`grpcSilentForNonAdmin`), не палит существование admin-команд.
+
+`@maydavpnbot`-суффикс отрезается перед матчингом, так что `/approve_42@maydavpnbot` тоже работает (на случай вызова в группе).
 
 ### Stage 6 — CTA click tracking
 

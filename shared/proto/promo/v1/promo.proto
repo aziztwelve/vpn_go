@@ -1,0 +1,165 @@
+syntax = "proto3";
+
+package promo.v1;
+
+option go_package = "github.com/vpn/shared/pkg/proto/promo/v1";
+
+// PromoService — персональные одноразовые скидки.
+//
+// Использование (см. promo_codes таблицу в auth-service migrations):
+//   1. Админ в боте /promo @username → Gateway вызывает IssuePromo →
+//      auth-service генерит token, INSERT promo_codes, возвращает token.
+//      Затем Gateway шлёт юзеру TG-сообщение с inline-кнопкой
+//      url=https://cdn.osmonai.com/promo/p/<token>.
+//   2. Юзер кликает → Gateway GET /promo/p/{token} →
+//      RedeemPromo резолвит token → user_id+plan_id+max_devices.
+//      Gateway вызывает payment-service.CreateInvoice с этими параметрами
+//      и AttachPayment(token, payment_id) для idempotent retry.
+//   3. Юзер платит → payment-service webhook → если payment_id найден в
+//      promo_codes, вызывает MarkUsed(payment_id) → SET used_at=NOW().
+//
+// Сервис хостится в auth-service бинарнике (та же БД, общие репозитории).
+service PromoService {
+  // IssuePromo — выдать новый промо токен юзеру. Admin-only.
+  // Идемпотентность: если у юзера уже есть АКТИВНЫЙ (used_at IS NULL)
+  // промо на тот же plan_id — возвращаем существующий token, не создаём
+  // дубликат (см. UNIQUE INDEX uniq_promo_codes_active в миграции).
+  rpc IssuePromo(IssuePromoRequest) returns (IssuePromoResponse);
+
+  // RedeemPromo — резолвит token → данные для CreateInvoice. Без авторизации
+  // (вызывается публичным GET /promo/p/{token}). Возвращает NotFound если
+  // токен неизвестен/expired, FailedPrecondition если used.
+  // Если payment_id уже привязан (двойной клик) — возвращает existing_payment_id,
+  // чтобы Gateway переиспользовал тот же invoice (idempotent).
+  rpc RedeemPromo(RedeemPromoRequest) returns (RedeemPromoResponse);
+
+  // AttachPayment — после CreateInvoice прикрепить payment_id к токену.
+  // Идемпотентность: если payment_id уже привязан и совпадает — OK,
+  // иначе FailedPrecondition (защита от race).
+  rpc AttachPayment(AttachPaymentRequest) returns (AttachPaymentResponse);
+
+  // MarkUsed — помечает promo по payment_id как использованный (used_at=NOW()).
+  // Вызывается payment-service webhook'ом при paid-статусе.
+  // No-op если payment_id не привязан ни к какому промо.
+  rpc MarkUsed(MarkUsedRequest) returns (MarkUsedResponse);
+
+  // GetPromoStatus — статус промо по user_id+plan_id (для админ-команды
+  // `/promo_status @user`). Возвращает NotFound если у юзера нет промо
+  // на этот план.
+  rpc GetPromoStatus(GetPromoStatusRequest) returns (GetPromoStatusResponse);
+
+  // LookupUser — резолвит @username или telegram_id в users.id для админ-
+  // команды /promo. Admin-only (бот не должен отдавать чужие user_id
+  // обычным юзерам). Возвращает NotFound если юзер не зарегистрирован
+  // (не открывал Mini App, нет записи в users).
+  rpc LookupUser(LookupUserRequest) returns (LookupUserResponse);
+}
+
+// ─── Authorization Helper (тот же паттерн что в broadcast.proto) ────
+
+message Auth {
+  // Ровно одно из полей должно быть != 0:
+  //   - admin_telegram_id — для callback'ов бота
+  //   - admin_user_id — для HTTP-ручек (берётся из JWT)
+  int64 admin_telegram_id = 1;
+  int64 admin_user_id = 2;
+}
+
+// ─── IssuePromo ────────────────────────────────────────────────────
+
+message IssuePromoRequest {
+  int64 user_id = 1;       // кому выдать промо
+  int32 plan_id = 2;       // обычно 101 для Промо 79₽
+  int32 max_devices = 3;   // обычно 2; матчится с device_addon_pricing
+  int64 ttl_seconds = 4;   // 0 = use default 30 days
+  Auth auth = 5;
+}
+
+message IssuePromoResponse {
+  string token = 1;        // 64 hex-символа
+  int64 promo_id = 2;
+  int64 expires_at_unix = 3;
+  // already_existed=true если вернули существующий токен (idempotent).
+  bool already_existed = 4;
+}
+
+// ─── RedeemPromo ───────────────────────────────────────────────────
+
+message RedeemPromoRequest {
+  string token = 1;
+}
+
+message RedeemPromoResponse {
+  int64 promo_id = 1;
+  int64 user_id = 2;
+  int32 plan_id = 3;
+  int32 max_devices = 4;
+
+  // Если != 0 — для этого токена уже создан payment. Gateway должен
+  // переиспользовать его (GET payment по id) вместо создания нового.
+  int64 existing_payment_id = 5;
+
+  // true если уже used (paid). Gateway должен показать "уже оплачено".
+  bool already_used = 6;
+}
+
+// ─── AttachPayment ────────────────────────────────────────────────
+
+message AttachPaymentRequest {
+  string token = 1;
+  int64 payment_id = 2;
+}
+
+message AttachPaymentResponse {
+  bool ok = 1;
+}
+
+// ─── MarkUsed ──────────────────────────────────────────────────────
+
+message MarkUsedRequest {
+  int64 payment_id = 1;
+}
+
+message MarkUsedResponse {
+  // matched=true если был найден promo по payment_id и помечен used.
+  // false — payment не связан с промо (обычная оплата, не из акции).
+  bool matched = 1;
+  int64 promo_id = 2;
+  int64 user_id = 3;
+}
+
+// ─── GetPromoStatus ────────────────────────────────────────────────
+
+message GetPromoStatusRequest {
+  int64 user_id = 1;
+  int32 plan_id = 2;
+  Auth auth = 3;
+}
+
+message GetPromoStatusResponse {
+  int64 promo_id = 1;
+  string token = 2;
+  int64 created_at_unix = 3;
+  int64 expires_at_unix = 4;
+  int64 used_at_unix = 5;       // 0 если не использован
+  int64 payment_id = 6;          // 0 если не было кликов
+}
+
+// ─── LookupUser ────────────────────────────────────────────────────
+
+message LookupUserRequest {
+  // Один из:
+  //   - username (без @-префикса, case-insensitive в SQL: ILIKE)
+  //   - telegram_id (int64)
+  // Если оба заданы — telegram_id имеет приоритет.
+  string username = 1;
+  int64 telegram_id = 2;
+  Auth auth = 3;
+}
+
+message LookupUserResponse {
+  int64 user_id = 1;
+  int64 telegram_id = 2;
+  string username = 3;       // как хранится в users.username
+  string first_name = 4;
+}

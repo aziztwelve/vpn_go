@@ -1,0 +1,50 @@
+# ============================================================
+# RU-mirror compose — крутится на отдельном RU-VPS (Timeweb).
+# ============================================================
+# Только Caddy. WireGuard ставится на host (systemd wg-quick@wg0),
+# чтобы Caddy мог дёргать FI gateway по 10.13.13.1:8081.
+#
+# Запуск:
+#   1. Поднять WG туннель к FI (см. wireguard.md).
+#   2. Заполнить .env (см. .env.example).
+#   3. docker compose up -d
+#
+# Caddy сам выпустит LE-серт по HTTP-01 на порт 80.
+# ============================================================
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: ru-mirror-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"          # HTTP/3
+    environment:
+      RU_DOMAIN: ${RU_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+      # GATEWAY_UPSTREAM = WG-IP FI-стороны + порт gateway (8081).
+      # На FI должно быть забинжено `10.13.13.1:8081:8081` в основном
+      # docker-compose.yml (см. README.md).
+      GATEWAY_UPSTREAM: ${GATEWAY_UPSTREAM:-10.13.13.1:8081}
+    extra_hosts:
+      # Caddy внутри контейнера должен достучаться до WG-адреса хоста.
+      # На Linux 10.13.13.1 — это интерфейс wg0 хоста; контейнер видит
+      # его через bridge, поэтому extra_hosts не критично, но оставлено
+      # как явная документация.
+      - "host.gateway:10.13.13.1"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - ru-mirror
+
+networks:
+  ru-mirror:
+    name: ru-mirror
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -29,6 +29,9 @@ func NewVPNClient(addr string, logger *zap.Logger) (*VPNClient, error) {
 	}, nil
 }
 
+// Conn returns the underlying gRPC connection (for health checks).
+func (c *VPNClient) Conn() *grpc.ClientConn { return c.conn }
+
 func (c *VPNClient) Close() error {
 	return c.conn.Close()
 }

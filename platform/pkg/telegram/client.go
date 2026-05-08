@@ -154,14 +154,46 @@ type InlineKeyboardMarkup struct {
 	InlineKeyboard [][]InlineKeyboardButton `json:"inline_keyboard"`
 }
 
+// KeyboardButton — кнопка в reply-keyboard (постоянная клавиатура внизу
+// чата, в отличие от InlineKeyboardButton которая под сообщением).
+// Поддерживаем text и web_app — этого хватает для нашего UX (см. task 18).
+// https://core.telegram.org/bots/api#keyboardbutton
+type KeyboardButton struct {
+	Text   string      `json:"text"`
+	WebApp *WebAppInfo `json:"web_app,omitempty"`
+}
+
+// ReplyKeyboardMarkup — постоянная клавиатура внизу чата. В отличие от
+// inline-keyboard, остаётся видимой до явного убирания (или пока
+// is_persistent=true). Telegram автоматически отправляет text кнопки как
+// обычное сообщение от юзера, поэтому в handleCommand мы матчим эти строки.
+//
+// is_persistent=true (Bot API 6.5, январь 2023) держит клавиатуру
+// раскрытой между сообщениями бота — без re-attach при каждом ответе.
+// resize_keyboard=true делает кнопки компактнее (как у нативной мобильной
+// keyboard'ы), без него кнопки растянутся на всю высоту области ввода.
+//
+// https://core.telegram.org/bots/api#replykeyboardmarkup
+type ReplyKeyboardMarkup struct {
+	Keyboard       [][]KeyboardButton `json:"keyboard"`
+	IsPersistent   bool               `json:"is_persistent,omitempty"`
+	ResizeKeyboard bool               `json:"resize_keyboard,omitempty"`
+}
+
 // SendMessageParams — параметры sendMessage. Не-используемые поля опущены —
 // добавим по мере надобности.
+//
+// ReplyMarkup имеет тип `any` потому что Telegram-API поле reply_markup —
+// union: может быть InlineKeyboardMarkup, ReplyKeyboardMarkup,
+// ReplyKeyboardRemove или ForceReply. На JSON-уровне Go marshall'ит структуру
+// по тегам полей одинаково для любого варианта.
+//
 // https://core.telegram.org/bots/api#sendmessage
 type SendMessageParams struct {
-	ChatID      int64                 `json:"chat_id"`
-	Text        string                `json:"text"`
-	ParseMode   string                `json:"parse_mode,omitempty"` // "HTML" | "Markdown" | "MarkdownV2"
-	ReplyMarkup *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
+	ChatID      int64  `json:"chat_id"`
+	Text        string `json:"text"`
+	ParseMode   string `json:"parse_mode,omitempty"` // "HTML" | "Markdown" | "MarkdownV2"
+	ReplyMarkup any    `json:"reply_markup,omitempty"`
 	// LinkPreviewOptions.is_disabled = true — чтобы приветствие не тащило
 	// превью картинки с cdn.*. Для простоты используем legacy-поле.
 	DisableWebPagePreview bool `json:"disable_web_page_preview,omitempty"`

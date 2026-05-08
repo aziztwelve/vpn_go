@@ -1,0 +1,75 @@
+# ============================================================
+# Caddy на RU-VPS — RU-зеркало подписочного эндпоинта.
+# ============================================================
+# Назначение: терминирует TLS на `s.osmonai.com` и проксирует ТОЛЬКО
+# `/api/v1/subscription/*` на FI gateway через WireGuard-туннель.
+# Всё остальное → 404 (минимизируем attack surface).
+#
+# См. tasks/16-rkn-resilience.md (Stage 2) и deploy/ru-mirror/README.md.
+#
+# Переменные ($VAR) подставляет shell перед `docker compose up`
+# или systemd EnvironmentFile.
+# ============================================================
+{
+	email {$ACME_EMAIL}
+}
+
+{$RU_DOMAIN} {
+	encode gzip zstd
+
+	# Подписочный эндпоинт — единственное что мы тут разрешаем наружу.
+	# Реальный обработчик — на FI gateway, мы только реверс-проксим
+	# через WG-туннель (10.13.13.1 = адрес FI-стороны WG).
+	@subscription path /api/v1/subscription/*
+	handle @subscription {
+		# Кратко-живущий публичный кэш (HAPP всё равно тянет раз в час
+		# по `Profile-Update-Interval: 1`). Сильно режет cross-border
+		# трафик через WG, не ломает оперативность ротации серверов.
+		header Cache-Control "public, max-age=120"
+
+		reverse_proxy {$GATEWAY_UPSTREAM} {
+			# Gateway отдаёт subscription_url через resolvePublicBaseURL,
+			# а тот смотрит X-Forwarded-Host. Передаём родной хост запроса
+			# (s.osmonai.com), чтобы Profile-Web-Page-URL и подобное
+			# собиралось с RU-доменом, а не с FI hostname.
+			header_up Host {host}
+			header_up X-Forwarded-Host {host}
+			header_up X-Forwarded-Proto https
+			header_up X-Real-IP {remote_host}
+
+			# Health-check — gateway отвечает 200 на /health.
+			# Caddy v2 умеет active health-checks, оставляем дефолт.
+			lb_try_duration 3s
+			fail_duration 30s
+			max_fails 3
+		}
+	}
+
+	# Health для UptimeRobot/локального мониторинга. На gateway тоже есть,
+	# но через тот путь идёт ходка по WG → /health (RU-mirror) проверяет
+	# что и Caddy жив, и тоннель работает.
+	@health path /health
+	handle @health {
+		reverse_proxy {$GATEWAY_UPSTREAM} {
+			header_up Host {host}
+		}
+	}
+
+	# Всё остальное (включая корень, Mini App) — 404. Не отдаём ни байта,
+	# чтобы не плодить вектора атаки и не светить, что мы вообще VPN.
+	respond 404 {
+		close
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

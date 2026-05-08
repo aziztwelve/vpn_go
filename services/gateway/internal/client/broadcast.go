@@ -57,6 +57,34 @@ func (c *BroadcastClient) CancelBroadcastByTelegramID(ctx context.Context, draft
 	})
 }
 
+// ListBroadcastsByTelegramID — для bot-команды /admin (admin берётся из
+// Message.From.ID). Параметры идентичны ListBroadcasts (HTTP-вариант).
+func (c *BroadcastClient) ListBroadcastsByTelegramID(
+	ctx context.Context,
+	adminTGID int64,
+	statusFilter, segmentFilter string,
+	limit, offset int32,
+) (*pb.ListBroadcastsResponse, error) {
+	return c.client.ListBroadcasts(ctx, &pb.ListBroadcastsRequest{
+		Auth:          authFromTelegramID(adminTGID),
+		StatusFilter:  statusFilter,
+		SegmentFilter: segmentFilter,
+		Limit:         limit,
+		Offset:        offset,
+	})
+}
+
+// GetBroadcastDetailsByTelegramID — для bot-команды /broadcast_stats <id>.
+func (c *BroadcastClient) GetBroadcastDetailsByTelegramID(
+	ctx context.Context,
+	draftID, adminTGID int64,
+) (*pb.BroadcastDetails, error) {
+	return c.client.GetBroadcastDetails(ctx, &pb.GetBroadcastDetailsRequest{
+		DraftId: draftID,
+		Auth:    authFromTelegramID(adminTGID),
+	})
+}
+
 // ─── Используется HTTP-админкой ────────────────────────────────────
 
 func (c *BroadcastClient) ApproveBroadcast(ctx context.Context, draftID, adminUserID int64) (*pb.ApproveBroadcastResponse, error) {

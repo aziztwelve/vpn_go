@@ -29,6 +29,9 @@ func NewSubscriptionClient(addr string, logger *zap.Logger) (*SubscriptionClient
 	}, nil
 }
 
+// Conn returns the underlying gRPC connection (for health checks).
+func (c *SubscriptionClient) Conn() *grpc.ClientConn { return c.conn }
+
 func (c *SubscriptionClient) Close() error {
 	return c.conn.Close()
 }

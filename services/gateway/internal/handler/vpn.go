@@ -182,13 +182,44 @@ func (h *VPNHandler) GetSubscriptionToken(w http.ResponseWriter, r *http.Request
 	})
 }
 
-// resolvePublicBaseURL — приоритет PUBLIC_BASE_URL env → X-Forwarded-* → Host.
-// Нужно потому что за Cloudflare Tunnel req.Host = локальный, а клиенту нужен
-// публичный домен.
+// resolvePublicBaseURL — глобальная публичная база (приоритет PUBLIC_BASE_URL env).
+// Используется в /vpn/subscription-token, чтобы Mini App возвращал юзеру
+// _один_ канонический URL подписки независимо от того, через какой домен
+// (cdn.osmonai.com или s.osmonai.com) пришёл сам Mini App-запрос. Это нужно,
+// чтобы можно было централизованно переключить всю аудиторию на RU-зеркало
+// одной env-переменной (см. tasks/16-rkn-resilience.md Stage 2 §G).
+//
+// Порядок: PUBLIC_BASE_URL env → X-Forwarded-* → Host.
 func resolvePublicBaseURL(r *http.Request) string {
 	if v := os.Getenv("PUBLIC_BASE_URL"); v != "" {
 		return strings.TrimRight(v, "/")
 	}
+	proto := r.Header.Get("X-Forwarded-Proto")
+	if proto == "" {
+		if r.TLS != nil {
+			proto = "https"
+		} else {
+			proto = "http"
+		}
+	}
+	host := r.Header.Get("X-Forwarded-Host")
+	if host == "" {
+		host = r.Host
+	}
+	return fmt.Sprintf("%s://%s", proto, host)
+}
+
+// resolveRequestBaseURL — динамический base URL «откуда пришёл — туда и
+// отправляй». Используется в Profile-Web-Page-URL заголовке подписки:
+// если юзер скачал подписку с s.osmonai.com (RU-mirror), HAPP/Hiddify должен
+// открывать кнопку «Manage subscription» на этом же домене, а не на
+// cdn.osmonai.com (который у юзера может быть заблокирован). И наоборот.
+//
+// Порядок: X-Forwarded-Host → Host. PUBLIC_BASE_URL тут НЕ используется
+// специально — задача функции в том чтобы _не_ навязывать единый домен.
+// Caddy (FI и RU) безусловно переписывает X-Forwarded-Host, поэтому
+// подделка извне невозможна.
+func resolveRequestBaseURL(r *http.Request) string {
 	proto := r.Header.Get("X-Forwarded-Proto")
 	if proto == "" {
 		if r.TLS != nil {
