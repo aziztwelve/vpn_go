@@ -52,6 +52,23 @@ const (
 	webAppConnectURL = "https://cdn.osmonai.com/connect"
 )
 
+// instructionPostURL — пост в TG-канале @maydavpn с пошаговой инструкцией
+// по подключению. Кнопка «📖 Как подключиться» в карточке статуса (после
+// нажатия «🌐 Подключиться») ведёт сюда. Если пост поменяется —
+// либо обновить константу, либо переопределить через env INSTRUCTION_POST_URL.
+const instructionPostURL = "https://t.me/maydavpn/14"
+
+// resolveInstructionPostURL — env-override для instructionPostURL.
+// Возвращает значение из ENV INSTRUCTION_POST_URL если оно непустое,
+// иначе захардкоженный default. Вынесено в функцию а не в init() чтобы
+// тесты могли подменить env прямо перед вызовом без перезапуска процесса.
+func resolveInstructionPostURL() string {
+	if v := os.Getenv("INSTRUCTION_POST_URL"); v != "" {
+		return v
+	}
+	return instructionPostURL
+}
+
 // Callback-data префиксы для inline-кнопок, которые рисуют handleConnectButton/
 // handleBuyButton. Длина < 64 байт (лимит Telegram).
 //
@@ -275,14 +292,21 @@ func (h *TelegramBotHandler) handleConnectButton(ctx context.Context, chatID, te
 		return
 	}
 
+	instructionURL := resolveInstructionPostURL()
+
 	// Нет активной подписки → CTA на тарифы.
 	if subResp == nil || !subResp.HasActive || subResp.Subscription == nil {
 		text := "📡 У тебя пока нет активной подписки.\n\nВыбери тариф — получишь ключ сразу после оплаты."
 		kb := &telegram.InlineKeyboardMarkup{
-			InlineKeyboard: [][]telegram.InlineKeyboardButton{{
-				{Text: "💳 К тарифам", CallbackData: cbBuyPrompt},
-				{Text: "📱 Открыть приложение", WebApp: &telegram.WebAppInfo{URL: webAppPlansURL}},
-			}},
+			InlineKeyboard: [][]telegram.InlineKeyboardButton{
+				{
+					{Text: "💳 К тарифам", CallbackData: cbBuyPrompt},
+					{Text: "📱 Открыть приложение", WebApp: &telegram.WebAppInfo{URL: webAppPlansURL}},
+				},
+				{
+					{Text: "📖 Как подключиться", URL: instructionURL},
+				},
+			},
 		}
 		_ = h.telegramClient.SendMessage(ctx, telegram.SendMessageParams{
 			ChatID:      chatID,
@@ -293,13 +317,20 @@ func (h *TelegramBotHandler) handleConnectButton(ctx context.Context, chatID, te
 		return
 	}
 
-	// Активная подписка → карточка статуса.
+	// Активная подписка → карточка статуса. Три inline-кнопки в два ряда:
+	// верх — два главных action'а (Mini App connect + получить ссылку),
+	// низ — отдельной строкой ссылка на инструкцию в канале @maydavpn.
 	text := formatSubscriptionCard(subResp.Subscription, telegramID)
 	kb := &telegram.InlineKeyboardMarkup{
-		InlineKeyboard: [][]telegram.InlineKeyboardButton{{
-			{Text: "📱 Подключиться", WebApp: &telegram.WebAppInfo{URL: webAppConnectURL}},
-			{Text: "🔑 Получить ссылку", CallbackData: cbGetSubLink},
-		}},
+		InlineKeyboard: [][]telegram.InlineKeyboardButton{
+			{
+				{Text: "📱 Подключиться", WebApp: &telegram.WebAppInfo{URL: webAppConnectURL}},
+				{Text: "🔑 Получить ссылку", CallbackData: cbGetSubLink},
+			},
+			{
+				{Text: "📖 Как подключиться", URL: instructionURL},
+			},
+		},
 	}
 	_ = h.telegramClient.SendMessage(ctx, telegram.SendMessageParams{
 		ChatID:      chatID,
