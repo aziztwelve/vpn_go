@@ -339,7 +339,7 @@ func (h *TelegramBotHandler) sendStartMessage(ctx context.Context, chatID int64,
 ✨ Вы получили <b>3 дня пробного периода</b>
 
 Подпишитесь на канал @maydavpn
-Техподдержка 24/7 — @maydavpn_support
+Техподдержка — @maydavpn_support
 
 Жми 👇🏻`
 
