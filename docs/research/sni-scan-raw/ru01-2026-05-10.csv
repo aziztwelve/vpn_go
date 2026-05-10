@@ -1,0 +1,24 @@
+IP,ORIGIN,CERT_DOMAIN,CERT_ISSUER,GEO_CODE
+91.184.245.13,91.184.245.0/24,m.devrandom-as-a-service.com,"Let's Encrypt",N/A
+91.184.245.31,91.184.245.0/24,grishchenkov.ru,"Let's Encrypt",N/A
+91.184.245.10,91.184.245.0/24,*.max.ru,"GlobalSign nv-sa",N/A
+91.184.245.34,91.184.245.0/24,*.vk.com,"GlobalSign nv-sa",N/A
+91.184.245.40,91.184.245.0/24,v2907867.hosted-by-vdsina.ru,"Let's Encrypt",N/A
+91.184.245.46,91.184.245.0/24,*.max.ru,"GlobalSign nv-sa",N/A
+91.184.245.50,91.184.245.0/24,v2714914.hosted-by-vdsina.ru,"Let's Encrypt",N/A
+91.184.245.44,91.184.245.0/24,oam.komeo.fr,"Let's Encrypt",N/A
+91.184.245.60,91.184.245.0/24,*.yandex.tr,"GlobalSign nv-sa",N/A
+91.184.245.69,91.184.245.0/24,admin.vpn-for-friends.com,"Let's Encrypt",N/A
+91.184.245.104,91.184.245.0/24,*.vk.com,"GlobalSign nv-sa",N/A
+91.184.245.115,91.184.245.0/24,axerio.ru,"Let's Encrypt",N/A
+91.184.245.121,91.184.245.0/24,*.yandex.tr,"GlobalSign nv-sa",N/A
+91.184.245.141,91.184.245.0/24,myserver,"inter",N/A
+91.184.245.140,91.184.245.0/24,images.apple.com,"Apple Inc.",N/A
+91.184.245.138,91.184.245.0/24,yahoo.com,"DigiCert Inc",N/A
+91.184.245.117,91.184.245.0/24,*.dion.vc,"GlobalSign nv-sa",N/A
+91.184.245.179,91.184.245.0/24,j.sni-644-default.ssl.fastly.net,"GlobalSign nv-sa",N/A
+91.184.245.181,91.184.245.0/24,github.com,"Sectigo Limited",N/A
+91.184.245.198,91.184.245.0/24,mail.hohlov.tech,"Let's Encrypt",N/A
+91.184.245.200,91.184.245.0/24,*.max.ru,"GlobalSign nv-sa",N/A
+91.184.245.208,91.184.245.0/24,xn-----2026-1fgaca8ble7b2ap3bf9cdo8a.xn--p1ai,"Let's Encrypt",N/A
+91.184.245.223,91.184.245.0/24,*.local,"OpenClaw",N/A

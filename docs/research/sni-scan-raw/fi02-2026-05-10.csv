@@ -1,0 +1,22 @@
+IP,ORIGIN,CERT_DOMAIN,CERT_ISSUER,GEO_CODE
+204.168.248.31,204.168.248.0/24,CloudFlare Origin Certificate,"CloudFlare, Inc.",N/A
+204.168.248.25,204.168.248.0/24,proquelec.wanekoohost.com,"Let's Encrypt",N/A
+204.168.248.2,204.168.248.0/24,mail.mxhosting.org,"Let's Encrypt",N/A
+204.168.248.41,204.168.248.0/24,play-herd.com,"Let's Encrypt",N/A
+204.168.248.44,204.168.248.0/24,CloudFlare Origin Certificate,"CloudFlare, Inc.",N/A
+204.168.248.87,204.168.248.0/24,creative-demo.dh.sg,"Let's Encrypt",N/A
+204.168.248.92,204.168.248.0/24,crm.legalexito.com,"Let's Encrypt",N/A
+204.168.248.128,204.168.248.0/24,CloudFlare Origin Certificate,"CloudFlare, Inc.",N/A
+204.168.248.141,204.168.248.0/24,RunCloud Web Certificate,"RunCloud Sdn. Bhd.",N/A
+204.168.248.153,204.168.248.0/24,rcmotos.es,"Let's Encrypt",N/A
+204.168.248.155,204.168.248.0/24,fixaki.com.cy,"Let's Encrypt",N/A
+204.168.248.156,204.168.248.0/24,ekizenergy.tech,"Let's Encrypt",N/A
+204.168.248.162,204.168.248.0/24,testi.surma-aho.com,"Let's Encrypt",N/A
+204.168.248.168,204.168.248.0/24,api.klearbox.net,"Let's Encrypt",N/A
+204.168.248.175,204.168.248.0/24,Kubernetes Ingress Controller Fake Certificate,"Acme Co",N/A
+204.168.248.185,204.168.248.0/24,support.yay88win.com,"Let's Encrypt",N/A
+204.168.248.208,204.168.248.0/24,*.h3s.dk,"Let's Encrypt",N/A
+204.168.248.224,204.168.248.0/24,demo.betengines.com,"Let's Encrypt",N/A
+204.168.248.250,204.168.248.0/24,www.loveis.com.br,"Let's Encrypt",N/A
+204.168.248.253,204.168.248.0/24,fi1.lumiovpn.com,"Let's Encrypt",N/A
+204.168.248.249,204.168.248.0/24,cp.croflow.in,"Let's Encrypt",N/A

@@ -94,32 +94,39 @@
 - Whois показывает Namecheap WhoisGuard, не личные данные ✅
 - TTL 215 + DNS-only — отложено до Stage 4 (создание `w1`-записи)
 
-### Stage 3 — RealiTLScanner на текущих 3 VPS (разведка) — ~1 час
+### Stage 3 — RealiTLScanner на текущих VPS (разведка) — ✅ ГОТОВО для fi02 и ru01 (2026-05-10)
 
-Цель: получить пулы по 4 donor SNI per VPS. Деплой пока не трогаем — это только разведка.
+Цель: получить пулы по 4 donor SNI per VPS. Деплой не трогаем — это разведка.
 
-Для каждого активного VPS (Falkenstein DE, текущая RU-нода, и др.):
+**Что сделано (2026-05-10):**
+- Запустил `RealiTLScanner` на `fi02` (NL, /24=204.168.248.0/24) и `ru01` (RU AS48282 vdsina, /24=91.184.245.0/24). Скан занял ~25 секунд каждый, дал 22+24 кандидата.
+- Curl-валидация TLS handshake через `--resolve` для каждого кандидата (HTTP/2 ответ, валидный cert, не CDN-origin).
+- Отбраковка вручную (VPN/gambling/dating/CDN-origin/fake-cert/Kubernetes-default) → отобрано 4 SNI per нода.
+- Результат: [`docs/research/sni-pools.md`](../research/sni-pools.md) (полные пулы + обоснование + резерв).
+- Raw CSV-логи сканов: [`docs/research/sni-scan-raw/`](../research/sni-scan-raw/).
+
+**Команда сканирования (актуальная для текущей версии RealiTLScanner — флаг `-showFail` убран в новой версии, заменён на `-out CSV` + log в stderr):**
 ```bash
-ssh root@<VPS-IP> bash -c "
-cd /tmp && \
-wget -q https://github.com/XTLS/RealiTLScanner/releases/latest/download/RealiTLScanner-linux-64 && \
-chmod +x RealiTLScanner-linux-64 && \
-./RealiTLScanner-linux-64 -addr <VPS-IP> -port 443 -showFail false -thread 50 \
-  | tee /root/sni-scan-\$(hostname).log
-"
-scp root@<VPS-IP>:/root/sni-scan-*.log ./
+ssh root@<VPS> bash -c '
+  cd /tmp && \
+  wget -q https://github.com/XTLS/RealiTLScanner/releases/latest/download/RealiTLScanner-linux-64 && \
+  chmod +x RealiTLScanner-linux-64 && \
+  nohup ./RealiTLScanner-linux-64 -addr <SUBNET>/24 -port 443 -thread 30 -timeout 8 -out scan.csv > scan.log 2>&1 &
+'
+# подождать 30 сек, потом scp scan.csv
 ```
 
-Из логов отобрать 4 кандидата на каждый VPS:
-- Валидный сертификат, TLS 1.3, HTTP/2
-- Не редиректит, реальный контент на главной
-- Вне РФ (для зарубежных VPS) / внутри РФ-AS (для MWS)
-- Не из спам/crypto/adult категорий
-- Желательно из разных организаций / регистраторов
+**Подобранные пулы (см. sni-pools.md для деталей):**
+- `fi02` (NL): dest=`creative-demo.dh.sg`, serverNames=[creative-demo.dh.sg, crm.legalexito.com, ekizenergy.tech, mail.mxhosting.org]
+- `ru01` (RU): dest=`grishchenkov.ru`, serverNames=[grishchenkov.ru, m.vk.com, www.max.ru, mail.hohlov.tech] — главное прикрытие `m.vk.com` + `www.max.ru` (белые у RKN)
 
-Положить результат в `vpn_go/docs/research/sni-pools.md` (новый файл — таблица VPS → 4 SNI).
+**Не сделано:**
+- `nl01` (146.103.112.91) — port 22 timeout с openclaw-workspace, отложено. Уточнить статус ноды.
+- MWS RU-VPS — ждёт Stage 4 (нода ещё не создана). При создании запустить тот же скан, отдельный приоритет — есть ли в /24 MWS `*.x5.ru` (proven у `geodataload.com`).
 
-**Acceptance:** есть подобранный пул из 4 SNI для каждого VPS на бумаге.
+**Acceptance (выполнено):**
+- ✅ Подобраны 4 SNI per VPS с обоснованием (см. `sni-pools.md`)
+- ✅ Raw CSV-логи сохранены в репе
 
 ### Stage 4 — MWS RU-VPS как новая нода `[LTE 2]` — ~3 часа
 
