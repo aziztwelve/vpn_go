@@ -37,3 +37,4 @@
 - [16-rkn-resilience.md](./16-rkn-resilience.md) — 🟡 RKN-устойчивость control-plane: RU-mirror подписки, multi-domain, anonymous registrar, origin IP whitelist
 - [17-ru-vps-lte.md](./17-ru-vps-lte.md) — 🟡 RU-VPS для LTE-обхода (Yandex.Cloud) — Hetzner DE не пробивает агрессивный DPI операторов в Хакасии/Сибири, разведка инфры конкурента (geodataload.com)
 - [18-bot-reply-keyboard.md](./18-bot-reply-keyboard.md) — 🔵 Reply-keyboard в боте: «🌐 Подключиться» + «🛒 Купить подписку» (заимствование UX EXTRA VPN, см. research/competitor-extravpn.md)
+- [end_sni.md](./end_sni.md) — 🟢 **Финальный план SNI/RU-инфра (endgame)** — объединяет 12+13+17 в пошаговый roadmap: домен `qubexlabs.com` под VPN-ноды (✅ Stage 2 готов: домен + CF + лендинг), далее MWS RU-VPS, RealiTLScanner SNI-пулы, per-server keys
