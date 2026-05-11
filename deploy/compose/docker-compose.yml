@@ -303,10 +303,21 @@ services:
       # fallback на наименее загруженный (servers[0]).
       SUBSCRIPTION_DEFAULT_COUNTRY: ${SUBSCRIPTION_DEFAULT_COUNTRY:-DE}
       LOG_LEVEL: ${GATEWAY_LOG_LEVEL}
-    # Gateway НЕ публикуется наружу: только через caddy:443.
-    # Если нужен прямой доступ (для локального дебага) — запусти с оверрайдом
-    # `docker compose -f docker-compose.yml -f docker-compose.dev.yml up`,
-    # где в docker-compose.dev.yml описан `ports: ["${GATEWAY_HTTP_PORT}:${GATEWAY_HTTP_PORT}"]`.
+    # Gateway наружу НЕ публикуется (только через caddy:443).
+    # НО биндим порт на WG-интерфейс 10.13.13.1, чтобы RU-mirror Caddy
+    # (с RU-VPS, через wg0) мог дозвониться сюда — он реверс-проксит на
+    # 10.13.13.1:8081 (см. deploy/ru-mirror/Caddyfile). Без этого binding-а
+    # хост не слушает 8081 ни на каком интерфейсе, и Caddy получает
+    # `dial tcp 10.13.13.1:8081: i/o timeout` → 502 на s.osmonai.com.
+    #
+    # WG-IP не интернет-фейс, наружу из-за этого ничего не светится.
+    # Если на хосте wg0 ещё не поднят — docker откажется стартовать
+    # контейнер; в этом случае закомментируй блок ports: или подними wg.
+    #
+    # Для локального дебага (прямой публичный 8081) — оверрайд через
+    # `docker compose -f docker-compose.yml -f docker-compose.dev.yml up`.
+    ports:
+      - "10.13.13.1:${GATEWAY_HTTP_PORT}:${GATEWAY_HTTP_PORT}"
     expose:
       - "${GATEWAY_HTTP_PORT}"
     networks: [vpn]
