@@ -13,7 +13,11 @@ type VPNServer struct {
 	PrivateKey           string
 	ShortID              string
 	Dest                 string
-	ServerNames          string
+	// ServerNames — пул SNI для Reality (хранится в БД как JSONB-массив,
+	// см. миграцию 010). Должен содержать ≥1 элемент. При формировании
+	// VLESS-link на gateway выбирается случайный — см.
+	// services/gateway/internal/handler/subscription_config.go::pickSNI.
+	ServerNames          []string
 	XrayAPIHost          string
 	XrayAPIPort          int32
 	InboundTag           string

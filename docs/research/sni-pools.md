@@ -1,7 +1,7 @@
 # SNI pools per VPS — Reality donor candidates
 
-**Дата:** 2026-05-10
-**Статус:** 🟢 Stage 3 (end_sni.md) — разведка завершена для 2 нод (`fi02`, `ru01`); `nl01` не доступен (port 22 timeout); MWS-нода ещё не куплена (Stage 4).
+**Дата:** 2026-05-11 (последнее обновление — добавлен `tw1` NSK)
+**Статус:** 🟢 Stage 3 — разведка завершена для `fi02`, `ru01`, `tw1` (RU LTE node). `nl01` отложен.
 
 ## Методология
 
@@ -149,6 +149,67 @@
 
 ---
 
+## tw1 — `186.246.31.92` (RU, TimeWeb Cloud NSK, AS9123, /24 = 186.246.31.0/24)
+
+**Контекст:** RU LTE-нода (Stage 4 в `end_sni.md`). TimeWeb NSK — Новосибирск, RU resident IP, ASN AS9123. Цель — обход keyword-DPI у мобильных операторов (МТС/Мегафон, Хакасия и др.) через SNI прикрытие *.vk.com / *.max.ru / *.music.yandex.ru.
+
+### Скан
+
+23 кандидата с TLS 1.3 + h2 в /24, за 14 сек. Лог: `sni-scan-raw/tw1-nsk-2026-05-11.csv`.
+
+### Отбракованы
+
+| SNI | Причина |
+|---|---|
+| `nsk-1-vm-*.twc1.net` (×4) | Hestia Control Panel default certs — пустые TimeWeb VPS |
+| `images.apple.com` (×2, Apple Inc. cert) | подделка/проксирование на TimeWeb IP — палево при active probing |
+| `github.com` (Sectigo cert) | НЕ настоящий GitHub (он на DigiCert), self-hosted git с похожим SNI |
+| `dev-api.namelessvpn.net` | конкурент-VPN — категорически палево |
+| `*.yandex.tr` | Yandex Turkey — `.tr` не RU, теряем главный плюс (RU camouflage) |
+| `sub.omi-home.online`, `bot-rn.space` | подозрительные TLD/новорегистрации |
+| `mbspl.as`, `admin.k0sha.su` | непонятные домены, не выглядят как обычный SMB |
+
+### ✅ Отобранный пул (4 SNI)
+
+| Роль | SNI | IP | HTTP | Cert | Категория |
+|---|---|---|---|---|---|
+| **dest** (primary) | `www.ub4hav.ru` | `186.246.31.164` | 200 OK + HTML | **GlobalSign** | RU SMB / corporate |
+| serverName | `m.vk.com` | `186.246.31.102` | 200 (HEAD=418) | GlobalSign `*.vk.com` | **VK мобайл** — главное прикрытие |
+| serverName | `web.max.ru` | `186.246.31.252` | 200 OK | GlobalSign `*.max.ru` | **Max мессенджер** (VK Holding) — белый у RKN |
+| serverName | `music.yandex.ru` | `186.246.31.249` | 200 OK | GlobalSign `*.music.yandex.ru` | **Яндекс.Музыка** — белый у всех мобильных операторов |
+
+**Замечания по выбору:**
+
+- 🎯 **Главный выигрыш:** все 4 SNI имеют **GlobalSign** chain. Когда Reality генерирует fake-cert по запрошенному SNI, issuer-chain копируется с `dest` — а dest тоже GlobalSign → issuer консистентен с VK/Max/Yandex. Активный пробер видит `*.vk.com / GlobalSign` или `*.max.ru / GlobalSign` — что и должно быть в норме.
+- Лучше чем ru01 (где `grishchenkov.ru` Let's Encrypt — issuer mismatch с GlobalSign-VK при cross-validation).
+- `ads.x5.ru` (302) рассматривался как dest, но 302 для primary fallback менее устойчив чем 200 на `www.ub4hav.ru`. Оставлен в резерве.
+- `m.vk.com` отдаёт 418 на HEAD (VK anti-scrape), но GET=200 — для serverNames это полностью OK.
+- Все 4 IP в `186.246.31.0/24` — одна подсеть, один TimeWeb NSK pool → reverse-DNS не выпадает.
+
+**Резерв:**
+- `dipnova.ru` (`186.246.31.116`) — Let's Encrypt, 200 OK, h2
+- `excldlc.ru` (`186.246.31.29`) — Let's Encrypt, 200 OK, h2
+- `www.moneouniform.ru` (`186.246.31.214`) — **GlobalSign**, 200 OK, h2 (можно подменить как dest)
+- `ads.x5.ru` (`186.246.31.110`) — Let's Encrypt, 302, корпсайт X5
+
+### Конфиг для tw1
+
+```json
+"realitySettings": {
+  "show": false,
+  "dest": "www.ub4hav.ru:443",
+  "xver": 0,
+  "serverNames": [
+    "www.ub4hav.ru",
+    "m.vk.com",
+    "web.max.ru",
+    "music.yandex.ru"
+  ]
+}
+```
+
+---
+
 ## nl01 — `146.103.112.91` — ❌ unreachable
 
 Port 22 timeout с этой машины. Возможные причины:
@@ -172,10 +233,11 @@ Port 22 timeout с этой машины. Возможные причины:
 
 ## Acceptance (Stage 3 для существующих VPS)
 
-- [x] RealiTLScanner запущен на доступных VPS (`fi02`, `ru01`)
-- [x] CSV-логи получены и сохранены (`/tmp/sni-scan/*.csv` на openclaw-workspace)
+- [x] RealiTLScanner запущен на доступных VPS (`fi02`, `ru01`, `tw1`)
+- [x] CSV-логи получены и сохранены (`docs/research/sni-scan-raw/*.csv`)
 - [x] Curl-валидация TLS handshake через `--resolve`
 - [x] Подобраны 4 SNI per VPS с обоснованием
 - [x] Записан этот файл (`docs/research/sni-pools.md`)
+- [x] `tw1` — RU LTE-нода (TimeWeb NSK), пул сформирован (см. выше)
 - [ ] `nl01` — **отложен** до восстановления доступа
-- [ ] MWS-нода — **ждёт Stage 4**
+- [ ] MWS-нода — деприоритезирована (взяли TimeWeb вместо MWS, см. `tw1` выше)

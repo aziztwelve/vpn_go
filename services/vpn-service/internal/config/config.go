@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 )
 
 type Config struct {
@@ -37,7 +38,10 @@ type XrayConfig struct {
 	VLESSPort         int
 	RealityPublicKey  string
 	RealityShortID    string
-	RealitySNI        string
+	// RealitySNI — пул SNI для локального dev-инбаунда (массив, формируется
+	// из comma-separated env `XRAY_REALITY_SNI`). Первый элемент идёт в
+	// `realitySettings.dest` при seed local server. См. config.New().
+	RealitySNI        []string
 }
 
 type LogConfig struct {
@@ -85,7 +89,7 @@ func New() (*Config, error) {
 			VLESSPort:        vlessPort,
 			RealityPublicKey: getEnv("XRAY_REALITY_PUBLIC_KEY", ""),
 			RealityShortID:   getEnv("XRAY_REALITY_SHORT_ID", ""),
-			RealitySNI:       getEnv("XRAY_REALITY_SNI", "github.com"),
+			RealitySNI:       parseSNIList(getEnv("XRAY_REALITY_SNI", "github.com")),
 		},
 		Log: LogConfig{
 			Level: getEnv("LOG_LEVEL", "info"),
@@ -105,4 +109,21 @@ func getEnv(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+// parseSNIList превращает comma-separated env (`a.com,b.com,c.com`) в []string.
+// Гарантия: если входная строка пустая после trim — возвращаем пустой slice
+// (caller сам решает дефолт). Каждый элемент trim-аем; пустые строки между
+// запятыми пропускаем (`a.com,,b.com` → ["a.com","b.com"]).
+//
+// Используется для XRAY_REALITY_SNI — пула donor-SNI локального Xray-инбаунда.
+func parseSNIList(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if v := strings.TrimSpace(p); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }

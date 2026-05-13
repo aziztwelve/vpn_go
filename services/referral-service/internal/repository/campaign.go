@@ -25,10 +25,10 @@ var ErrCampaignPayoutExists = errors.New("campaign payout for this payment alrea
 // На UNIQUE-конфликте по slug возвращает ErrCampaignSlugExists.
 func (r *Repository) CreateCampaign(ctx context.Context, c *model.Campaign) error {
 	err := r.db.QueryRow(ctx, `
-		INSERT INTO campaigns (slug, name, notes, partner_user_id, payout_percent, created_by, is_active)
-		VALUES ($1, $2, $3, $4, $5, $6, TRUE)
+		INSERT INTO campaigns (slug, name, notes, partner_user_id, payout_percent, created_by, is_active, trial_duration_days)
+		VALUES ($1, $2, $3, $4, $5, $6, TRUE, $7)
 		RETURNING id, created_at, is_active
-	`, c.Slug, c.Name, c.Notes, c.PartnerUserID, c.PayoutPercent, c.CreatedBy).
+	`, c.Slug, c.Name, c.Notes, c.PartnerUserID, c.PayoutPercent, c.CreatedBy, c.TrialDurationDays).
 		Scan(&c.ID, &c.CreatedAt, &c.IsActive)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -44,11 +44,11 @@ func (r *Repository) GetCampaignByID(ctx context.Context, id int64) (*model.Camp
 	c := &model.Campaign{}
 	err := r.db.QueryRow(ctx, `
 		SELECT id, slug, name, COALESCE(notes,''), partner_user_id, payout_percent,
-		       is_active, created_by, created_at, archived_at
+		       is_active, created_by, created_at, archived_at, trial_duration_days
 		FROM campaigns WHERE id = $1
 	`, id).Scan(
 		&c.ID, &c.Slug, &c.Name, &c.Notes, &c.PartnerUserID, &c.PayoutPercent,
-		&c.IsActive, &c.CreatedBy, &c.CreatedAt, &c.ArchivedAt,
+		&c.IsActive, &c.CreatedBy, &c.CreatedAt, &c.ArchivedAt, &c.TrialDurationDays,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -65,11 +65,11 @@ func (r *Repository) GetCampaignBySlug(ctx context.Context, slug string) (*model
 	c := &model.Campaign{}
 	err := r.db.QueryRow(ctx, `
 		SELECT id, slug, name, COALESCE(notes,''), partner_user_id, payout_percent,
-		       is_active, created_by, created_at, archived_at
+		       is_active, created_by, created_at, archived_at, trial_duration_days
 		FROM campaigns WHERE slug = $1 AND is_active = TRUE
 	`, slug).Scan(
 		&c.ID, &c.Slug, &c.Name, &c.Notes, &c.PartnerUserID, &c.PayoutPercent,
-		&c.IsActive, &c.CreatedBy, &c.CreatedAt, &c.ArchivedAt,
+		&c.IsActive, &c.CreatedBy, &c.CreatedAt, &c.ArchivedAt, &c.TrialDurationDays,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -80,12 +80,21 @@ func (r *Repository) GetCampaignBySlug(ctx context.Context, slug string) (*model
 	return c, nil
 }
 
-// UpdateCampaign — частичное обновление имени/notes/партнёра/процента.
-// nil-указатели = "не менять". Чтобы обнулить partner_user_id или payout_percent,
-// сервис передаёт указатель на 0/nil-структуру (см. service/campaign.go::UpdateCampaign).
+// UpdateCampaign — частичное обновление имени/notes/партнёра/процента/триал-override.
+// nil-указатели = "не менять". Чтобы обнулить partner_user_id / payout_percent /
+// trial_duration_days, сервис передаёт соответствующий clear*=true (см.
+// service/campaign.go::UpdateCampaign).
 //
 // Slug менять нельзя — у блогера уже на руках deep-link'и.
-func (r *Repository) UpdateCampaign(ctx context.Context, id int64, name, notes *string, partnerUserID *int64, payoutPercent *int32, clearPartner, clearPayout bool) error {
+func (r *Repository) UpdateCampaign(
+	ctx context.Context,
+	id int64,
+	name, notes *string,
+	partnerUserID *int64,
+	payoutPercent *int32,
+	clearPartner, clearPayout bool,
+	trialDurationDays *int32, clearTrialDuration bool,
+) error {
 	// Собираем динамический UPDATE — pgx не любит "if-arg-then-set".
 	args := []interface{}{}
 	sets := []string{}
@@ -109,6 +118,11 @@ func (r *Repository) UpdateCampaign(ctx context.Context, id int64, name, notes *
 		add("payout_percent", nil)
 	} else if payoutPercent != nil {
 		add("payout_percent", *payoutPercent)
+	}
+	if clearTrialDuration {
+		add("trial_duration_days", nil)
+	} else if trialDurationDays != nil {
+		add("trial_duration_days", *trialDurationDays)
 	}
 
 	if len(sets) == 0 {
@@ -169,7 +183,7 @@ func (r *Repository) ListCampaigns(ctx context.Context, includeArchived bool, li
 	args = append(args, limit, offset)
 	q := fmt.Sprintf(`
 		SELECT id, slug, name, COALESCE(notes,''), partner_user_id, payout_percent,
-		       is_active, created_by, created_at, archived_at
+		       is_active, created_by, created_at, archived_at, trial_duration_days
 		FROM campaigns
 		%s
 		ORDER BY created_at DESC
@@ -187,7 +201,7 @@ func (r *Repository) ListCampaigns(ctx context.Context, includeArchived bool, li
 		c := &model.Campaign{}
 		if err := rows.Scan(
 			&c.ID, &c.Slug, &c.Name, &c.Notes, &c.PartnerUserID, &c.PayoutPercent,
-			&c.IsActive, &c.CreatedBy, &c.CreatedAt, &c.ArchivedAt,
+			&c.IsActive, &c.CreatedBy, &c.CreatedAt, &c.ArchivedAt, &c.TrialDurationDays,
 		); err != nil {
 			return nil, 0, err
 		}

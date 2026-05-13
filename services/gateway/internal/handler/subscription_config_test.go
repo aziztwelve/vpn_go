@@ -34,7 +34,7 @@ func fixtureServer() *pb.Server {
 		Port:        8443,
 		PublicKey:   "Npb1GRjWa5dEHU0aTPyxQxN4YSnjNSiniwt1IBNOUn0",
 		ShortId:     "e01417022de29ba0",
-		ServerNames: "github.com",
+		ServerNames: []string{"github.com"},
 		IsActive:    true,
 	}
 }
@@ -204,8 +204,10 @@ func TestBuildXrayConfig_Structure(t *testing.T) {
 			if reality["publicKey"] != srv.PublicKey {
 				t.Errorf("reality.publicKey mismatch: %v", reality["publicKey"])
 			}
-			if reality["serverName"] != srv.ServerNames {
-				t.Errorf("reality.serverName mismatch: %v", reality["serverName"])
+			// serverName рандомится из пула — проверяем что результат входит в пул.
+			gotSNI, _ := reality["serverName"].(string)
+			if !sniInPool(gotSNI, srv.ServerNames) {
+				t.Errorf("reality.serverName=%q not in pool %v", gotSNI, srv.ServerNames)
 			}
 
 			// JSON-сериализация должна проходить без ошибки (реальный клиент
@@ -416,7 +418,14 @@ func TestClientShortID(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			srv := &pb.Server{ServerNames: c.sni, ShortId: "abc123"}
+			// После миграции 010 ServerNames — массив. clientShortID использует
+			// serverIsRussian (ANY-предикат), поэтому одно-элементный массив
+			// эквивалентен прежнему string-полю.
+			pool := []string{c.sni}
+			if c.sni == "" {
+				pool = nil // пустой пул как раньше отсутствие SNI
+			}
+			srv := &pb.Server{ServerNames: pool, ShortId: "abc123"}
 			if got := clientShortID(srv); got != c.want {
 				t.Errorf("sni=%q: want %q, got %q", c.sni, c.want, got)
 			}
@@ -433,7 +442,7 @@ func TestBuildVLESSLink_RUSniEmptyShortID(t *testing.T) {
 		Host: "178.105.1.202", Port: 1443,
 		PublicKey:   "GTmCq-rBPvmRTuh7tb_0xZGg7duSUFSB85yXkERZBWw",
 		ShortId:     "b470aa0f3b156a0f",
-		ServerNames: "ads.x5.ru",
+		ServerNames: []string{"ads.x5.ru"},
 		IsActive:    true,
 	}
 

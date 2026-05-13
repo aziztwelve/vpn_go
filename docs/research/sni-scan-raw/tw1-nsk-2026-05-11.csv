@@ -1,0 +1,23 @@
+IP,ORIGIN,CERT_DOMAIN,CERT_ISSUER,GEO_CODE
+186.246.31.29,186.246.31.0/24,excldlc.ru,"Let's Encrypt",N/A
+186.246.31.20,186.246.31.0/24,bot-rn.space,"Let's Encrypt",N/A
+186.246.31.39,186.246.31.0/24,admin.k0sha.su,"Let's Encrypt",N/A
+186.246.31.66,186.246.31.0/24,nsk-1-vm-o8rb.twc1.net,"Hestia Control Panel",N/A
+186.246.31.82,186.246.31.0/24,nsk-1-vm-jo33.twc1.net,"Hestia Control Panel",N/A
+186.246.31.87,186.246.31.0/24,nsk-1-vm-f31r.twc1.net,"Hestia Control Panel",N/A
+186.246.31.45,186.246.31.0/24,images.apple.com,"Apple Inc.",N/A
+186.246.31.97,186.246.31.0/24,mbspl.as,"Let's Encrypt",N/A
+186.246.31.102,186.246.31.0/24,*.vk.com,"GlobalSign nv-sa",N/A
+186.246.31.104,186.246.31.0/24,*.yandex.tr,"GlobalSign nv-sa",N/A
+186.246.31.110,186.246.31.0/24,ads.x5.ru,"Let's Encrypt",N/A
+186.246.31.117,186.246.31.0/24,nsk-1-vm-m46j.twc1.net,"Hestia Control Panel",N/A
+186.246.31.116,186.246.31.0/24,dipnova.ru,"Let's Encrypt",N/A
+186.246.31.138,186.246.31.0/24,mediatop.protuva.ru,"Let's Encrypt",N/A
+186.246.31.170,186.246.31.0/24,sub.omi-home.online,"Let's Encrypt",N/A
+186.246.31.164,186.246.31.0/24,www.ub4hav.ru,"GlobalSign nv-sa",N/A
+186.246.31.175,186.246.31.0/24,images.apple.com,"Apple Inc.",N/A
+186.246.31.214,186.246.31.0/24,www.moneouniform.ru,"GlobalSign nv-sa",N/A
+186.246.31.247,186.246.31.0/24,dev-api.namelessvpn.net,"Let's Encrypt",N/A
+186.246.31.252,186.246.31.0/24,*.max.ru,"GlobalSign nv-sa",N/A
+186.246.31.249,186.246.31.0/24,*.music.yandex.ru,"GlobalSign nv-sa",N/A
+186.246.31.248,186.246.31.0/24,github.com,"Sectigo Limited",N/A

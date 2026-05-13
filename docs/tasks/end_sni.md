@@ -52,19 +52,23 @@
 
 ## 📋 Этапы (последовательно)
 
-### Stage 1 — Подготовка кода (ничего не ломаем) — ~1 рабочий день
+### Stage 1 — Подготовка кода (ничего не ломаем) — ✅ ГОТОВО (2026-05-10)
 
 Цель: код готов к multi-SNI и domain-based host. Пока деплой не трогаем.
 
-- [ ] **Миграция 006** — `vpn_servers.server_names: TEXT → JSONB` (см. `12-sni-rotation.md` §1)
-- [ ] `model.VPNServer.ServerNames: string → []string` + везде в `repository/vpn.go` `pq.Array(...)`
-- [ ] `service/vpn.go:270` — `params.Add("sni", server.ServerNames[rand.Intn(len(...))])`
-- [ ] Sync `deploy/schema.sql` с реальным состоянием БД (там сейчас `JSONB`-врёт)
-- [ ] `deploy-xray-new.sh` — `serverNames` берёт массив через jq
-- [ ] Тесты: добавить кейсы для рандом-выбора SNI
-- [ ] Локально проверить: `vpn_servers` с массивом из 4 SNI → подписка отдаёт случайный
+- [x] **Миграция 010** — `vpn_servers.server_names: TEXT → JSONB` (`services/vpn-service/migrations/010_server_names_jsonb.up.sql`, `USING jsonb_build_array(server_names)`, default `'["github.com"]'::jsonb`). Применена в проде.
+- [x] `model.VPNServer.ServerNames: []string`. В `repository/vpn.go` — `scanServerNames`/`marshalServerNames` через JSONB cast (`server_names::text` на чтение, `$N::jsonb` на запись), pgx5-string-параметр чтобы избежать bytea-обёртки.
+- [x] `service/vpn.go:291` + `gateway/internal/handler/subscription_config.go:556` — `pickSNI(server.ServerNames)` (math/rand, 0/1/N контракт).
+- [x] Sync `deploy/schema.sql` с реальным состоянием БД (`server_names JSONB NOT NULL DEFAULT '["github.com"]'::jsonb`).
+- [x] `deploy-xray-new.sh` — `SNI_JSON_ARRAY` через `jq -cnR --arg s ... | split(",")`, INSERT с `'${SNI_JSON_ARRAY}'::jsonb`, валидация ≥1 элемент.
+- [x] Тесты:
+  - `repository/vpn_test.go` — round-trip `marshal↔scan`, защита от double-nested (`[["apple.com"]]` → error), nil/empty → `"[]"`.
+  - `gateway/handler/subscription_multisni_test.go` — `pickSNI` distribution / single / empty, `serverIsRussian` per-pool, `buildVLESSLink` + `writeJSONFormat` рандомят SNI per-link.
+- [x] Локально проверено на dev-стенде: 12× `GET /api/v1/subscription/<token>?format=v2ray-uri` для LTE-сервера (id=144, пул из 4 SNI) → за 12 запросов попались **все 4** SNI с примерно равным распределением. Single-SNI сервер id=143 → стабильно `apple.com`.
 
-**Acceptance:** на dev-стенде `curl /api/v1/subscription/<token>` отдаёт VLESS-ссылку с РАЗНЫМИ `?sni=` при 5 запросах подряд.
+**Acceptance:** на dev-стенде `curl /api/v1/subscription/<token>` отдаёт VLESS-ссылку с РАЗНЫМИ `?sni=` при ≥5 запросах подряд. ✅
+
+**Регресс-фикс (2026-05-10):** в первой версии `marshalServerNames` возвращал `[]byte`. pgx5 для `[]byte` параметра в JSONB-колонку делает encode как bytea + неявный cast `text→jsonb`, что для уже-JSON-payload иногда заворачивает его в JSON-string-в-JSONB → у части серверов в БД получились `[["apple.com"]]` (double-nested). Симптом: warn-лог `decode server_names: json: cannot unmarshal array into Go value of type string`, warm-up Xray-pool падал. Фикс: `marshalServerNames` отдаёт `string`, в SQL стоит `$N::jsonb`. Данные распакованы через `UPDATE … SET server_names = (server_names->0) WHERE jsonb_typeof(server_names->0) = 'array'`.
 
 ### Stage 2 — Новый домен под VPN-ноды — ✅ ГОТОВО (2026-05-10)
 
@@ -128,52 +132,51 @@ ssh root@<VPS> bash -c '
 - ✅ Подобраны 4 SNI per VPS с обоснованием (см. `sni-pools.md`)
 - ✅ Raw CSV-логи сохранены в репе
 
-### Stage 4 — MWS RU-VPS как новая нода `[LTE 2]` — ~3 часа
+### Stage 4 — RU-VPS как новая нода `[LTE 2]` — ✅ **закрыт 2026-05-11**
+
+> **История:** Изначально планировался MWS RU-VPS, но aziz выбрал **TimeWeb Cloud NSK** — лучше для LTE-обхода (RU resident IP, AS9123, цена ниже, локация Новосибирск ближе к Хакасии). Подсеть `186.246.31.0/24`, IP=`186.246.31.92`, hostname `nsk-1-vm-0qoi`.
+>
+> **Server id=172** в `vpn_servers`, priority=5, hostname=`w1.qubexlabs.com:1443`, GlobalSign-only SNI pool.
 
 Цель: реальная нода в РФ под `vless-reality-rusni-in`.
 
-- [ ] **Подготовка VPS** (доступ дать через ssh-key):
+- [x] **Подготовка VPS** (TimeWeb NSK, ssh-key RSA-4096 в `~/.ssh/vpn_nodes_rsa` — TimeWeb форма отвергла ed25519):
   ```bash
-  bash deploy/scripts/prepare-vps.sh
+  ssh tw1 'bash -s' < deploy/scripts/prepare-vps.sh   # 2026-05-11
   ```
-  ⚠️ Сначала запатчить ip6tables-блок (TODO из 2026-05-07, см. `memory/2026-05-07.md`)
+  Docker 29.4.3 + iptables/ip6tables lockdown :10085 (backend=`178.104.217.201` whitelisted, остальные DROP).
 
-- [ ] **Сгенерить новые Reality keys** (НЕ переиспользовать с Falkenstein):
+- [x] **Сгенерить новые Reality keys** (НЕ переиспользовать с Falkenstein):
   ```bash
-  bash deploy/scripts/deploy-xray-new.sh
+  ./deploy/scripts/deploy-xray-new.sh \
+      --name "[LTE 2] Россия (мобильный)" \
+      --location "Новосибирск" --country RU \
+      --host "w1.qubexlabs.com" --port 1443 \
+      --dest "www.ub4hav.ru:443" \
+      --sni "www.ub4hav.ru,m.vk.com,web.max.ru,music.yandex.ru" \
+      --inbound-tag "vless-reality-rusni-in"
   ```
+  - `PublicKey: a8lDH3BLQldFTVKW8Ln4T_tRdF8sbd4m19rLgPoOfnw`
+  - `ShortID:   c0090683314feb4c`
 
-- [ ] **RealiTLScanner на MWS** (Stage 3 для самой ноды) — найти 4 SNI в подсети MWS (вероятно, корпсайты на AS39497).
-  - Первичный (`dest`) — оставить как `ads.x5.ru` (проверен конкурентом, гарантированно работает на RU-маршруте) — **если** он есть в подсети MWS, иначе берём верхний из сканера.
-  - 3 остальных — из RealiTLScanner.
+  **Важно (зашито в скрипт после 2026-05-11):** при `--inbound-tag *rusni*` скрипт автоматически вставляет `""` в `shortIds` рядом с основным id, иначе клиенты не подключатся (`clientShortID()` в gateway отдаёт `""` для RU-SNI). Изначально на tw1 поймал руками — фиксил `jq` + `docker restart xray` + повторный ResyncServer.
 
-- [ ] **Конфиг Xray** (`/opt/xray/config.json`):
-  ```json
-  {
-    "inbounds": [{
-      "port": 1443,
-      "protocol": "vless",
-      "tag": "vless-reality-rusni-in",
-      "settings": { "decryption": "none", "clients": [] },
-      "streamSettings": {
-        "network": "tcp",
-        "security": "reality",
-        "realitySettings": {
-          "show": false,
-          "dest": "<sni-1>:443",
-          "xver": 0,
-          "serverNames": ["<sni-1>", "<sni-2>", "<sni-3>", "<sni-4>"],
-          "privateKey": "<новый_per_server>",
-          "shortIds": ["<random_8byte_hex>", ""]
-        }
-      }
-    }]
-  }
+- [x] **RealiTLScanner на tw1 NSK** (Stage 3 для самой ноды) — 23 кандидата в `186.246.31.0/24` за 14 сек. См. `docs/research/sni-pools.md` раздел `tw1`. Главный профит: **все 4 финальных SNI имеют GlobalSign chain** (issuer-consistent с *.vk.com / *.max.ru). Raw scan: `docs/research/sni-scan-raw/tw1-nsk-2026-05-11.csv`.
+  - `dest` = `www.ub4hav.ru:443` (TimeWeb-клиентский SMB-сайт, GlobalSign, 200 OK + HTML)
+  - serverNames pool = `[www.ub4hav.ru, m.vk.com, web.max.ru, music.yandex.ru]` — все GlobalSign, RU camouflage
+
+- [x] **Конфиг Xray** (`/opt/xray/config.json` на tw1) — сгенерён скриптом, проверены TLS-handshake на всех 4 SNI:
   ```
+  SNI=www.ub4hav.ru   → 200 (dest direct)
+  SNI=m.vk.com        → 301 (fallback to dest, cert=GlobalSign)
+  SNI=web.max.ru      → 301 (fallback)
+  SNI=music.yandex.ru → 301 (fallback)
+  ```
+  `shortIds: ["", "c0090683314feb4c"]` — фикс анти-DPI применён.
 
-- [ ] **A-record на новом домене:** `w1.qubexlabs.com → <MWS-IP>` (DNS-only, TTL 215)
+- [x] **A-record:** `w1.qubexlabs.com → 186.246.31.92` (Cloudflare DNS-only, TTL 215). Aziz исправил старую ошибочную запись (раньше указывала на ru-mirror `72.56.247.97`).
 
-- [ ] **INSERT в БД:**
+- [x] **INSERT в БД:**
   ```sql
   INSERT INTO vpn_servers (
     name, country_code, host, port,
@@ -211,6 +214,47 @@ ssh root@<VPS> bash -c '
 - [ ] **Реальный тест:** прислать ссылку Тапдыгу (или другому LTE-юзеру в проблемном регионе), подтвердить что обход работает.
 
 **Acceptance:** юзер из Хакасии подтверждает «работает», статистика подключений на новой ноде растёт.
+
+> ### 📝 Постскриптум 2026-05-11 (после deploy-а Stage 4 ~05:08)
+>
+> Архитектура **переделана со standalone Reality на cascade relay** через уже-существующий
+> exit fin2 (`178.105.1.202`, LTE 1 id=144). Теперь:
+> - На `tw1` конфиг заменён на `dokodemo-door :1443 → 178.105.1.202:1443` (backup сохранён
+>   как `/opt/xray/config.json.backup-before-relay-20260511-050824`).
+> - В БД `id=172` — клон Reality-параметров `id=144` (SNI `ads.x5.ru`,
+>   `pbk=GTmCq-rBPvmRTuh7tb_0xZGg7duSUFSB85yXkERZBWw`, `sid=b470aa0f3b156a0f`,
+>   `xray_api_host=178.105.1.202`). Поля описаны в
+>   [`add_server/README-relay.md`](../../add_server/README-relay.md).
+> - Старый `id=144` в БД деактивирован (`is_active=false`) — чтобы в подписке не было
+>   дубля на один и тот же fin2-инбаунд.
+> - Stage 4 SNI-пул `www.ub4hav.ru/m.vk.com/web.max.ru/music.yandex.ru` (см. выше) и
+>   Reality-ключи `a8lDH3BL...`/`c0090683314feb4c` **больше НЕ используются** — это были
+>   параметры от первого deploy-а, до cascade-решения.
+>
+> ### ⚠️ Известный bug: устаревшие подписки в Happ после cascade-перехода
+>
+> После замены Reality-ключей в `id=172` (Stage 4 → cascade) юзеры, которые успели
+> импортировать подписку в Happ между ~04:34 и ~05:08 2026-05-11, держат в клиентском
+> base64-кэше **старые ключи**. Reality на fin2 возвращает им
+> `authentication failed or validation criteria not met` (видно в `docker logs xray` на
+> fin2 с src=`186.246.31.92`).
+>
+> **Масштаб** (по `traffic_samples` за 24ч на 2026-05-12): из ~180 клиентов на
+> rusni-inbound реально юзают LTE2 cascade только 2-3 (те кто обновил подписку).
+>
+> **Решение** (на момент записи — в работе):
+> 1. Broadcast push «обновите подписку в Happ» через Telegram-бот.
+> 2. Проверить в `vpn_next` miniapp auto-refresh логику — может стоит force-update при
+>    первом открытии после серверного ключа-ротейшена.
+>
+> Полный разбор: <ref_file file="/root/.openclaw/workspace/memory/2026-05-12.md" />.
+>
+> ### Урок на будущее
+>
+> Не делать in-place UPDATE Reality-ключей у уже-развёрнутого server_id. Вместо этого —
+> новый server_id с новыми ключами, старый оставить is_active=true на 1-2 недели для
+> backward-compat, потом погасить. Или — массово force-refresh подписок до замены
+> ключей. См. TODO в <ref_file file="/root/.openclaw/workspace/vpn/vpn_go/docs/vpn/lte.md" />.
 
 ### Stage 5 — Применить мульти-SNI на текущие ноды — ~1 час
 
@@ -275,9 +319,9 @@ ssh root@<VPS> bash -c '
 
 ## ✅ Acceptance Criteria (полный)
 
-- [ ] Stage 1: dev-стенд эмитит подписку с РАНДОМНЫМ SNI из массива
-- [ ] Stage 2: `qubexlabs.com` на CF, anon WHOIS, 2FA, TTL=215, stub-лендинг отдаётся (домен куплен ✅)
-- [ ] Stage 3: SNI-пулы по 4 шт на каждый VPS зафиксированы в `research/sni-pools.md`
+- [x] Stage 1: dev-стенд эмитит подписку с РАНДОМНЫМ SNI из массива (12 запросов → все 4 SNI у LTE-сервера)
+- [x] Stage 2: `qubexlabs.com` на CF, anon WHOIS, 2FA, stub-лендинг 200 OK (TTL=215 применится в Stage 4 для `w1.*`)
+- [x] Stage 3: SNI-пулы зафиксированы в `research/sni-pools.md` (fi02, ru01)
 - [ ] Stage 4: MWS-нода в БД, ResyncServer прошёл, профиль `[LTE 2]` виден в подписке
 - [ ] Stage 4: реальный юзер из проблемного региона подтвердил «работает»
 - [ ] Stage 5A: на старых VPS добавлены новые SNI рядом с `apple.com`

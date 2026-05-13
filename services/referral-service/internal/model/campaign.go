@@ -7,16 +7,36 @@ import "time"
 // Slug используется в start-параметре Telegram (https://t.me/<bot>?start=src_<slug>).
 // Длина ≤ 60 чтобы вместе с префиксом "src_" уместиться в Telegram-лимит 64.
 type Campaign struct {
-	ID             int64
-	Slug           string
-	Name           string
-	Notes          string
-	PartnerUserID  *int64 // NULL = без выплат партнёру
-	PayoutPercent  *int32 // NULL = без выплат
-	IsActive       bool
-	CreatedBy      int64
-	CreatedAt      time.Time
-	ArchivedAt     *time.Time // NULL = активна
+	ID                 int64
+	Slug               string
+	Name               string
+	Notes              string
+	PartnerUserID      *int64 // NULL = без выплат партнёру
+	PayoutPercent      *int32 // NULL = без выплат
+	IsActive           bool
+	CreatedBy          int64
+	CreatedAt          time.Time
+	ArchivedAt         *time.Time // NULL = активна
+	TrialDurationDays  *int32     // NULL = дефолт (subscription_plans.id=99, 3 дня); 3/7/15/30/60/90 = override (см. task 19)
+}
+
+// AllowedTrialDurationDays — единый источник правды по разрешённым пресетам
+// для override длительности триала (см. task 19). Совпадает с CHECK'ом в
+// миграции 004_campaign_trial_override.up.sql.
+var AllowedTrialDurationDays = []int32{3, 7, 15, 30, 60, 90}
+
+// IsValidTrialDurationDays — true если значение допустимо как override,
+// nil считается валидным (= использовать дефолт).
+func IsValidTrialDurationDays(d *int32) bool {
+	if d == nil {
+		return true
+	}
+	for _, v := range AllowedTrialDurationDays {
+		if v == *d {
+			return true
+		}
+	}
+	return false
 }
 
 // CampaignStats — агрегированные метрики воронки за период (или за всё время).

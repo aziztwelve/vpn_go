@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	mrand "math/rand"
 	"net/url"
 	"strings"
 	"time"
@@ -16,6 +17,26 @@ import (
 	"github.com/vpn/vpn-service/internal/repository"
 	"go.uber.org/zap"
 )
+
+// pickSNI выбирает один SNI из пула server.ServerNames для конкретного
+// VLESS-link. Криптостойкость не нужна — это лишь декорреляция SNI у
+// последовательных коннектов; используем math/rand. См. end_sni.md
+// Stage 1, секция «multi-SNI rationale».
+//
+// Контракт: если пул пуст — возвращаем "". Caller (gateway / legacy
+// GetVLESSLink) сам решает что делать (обычно пропускает сервер либо
+// выдаёт fallback). На проде такого быть не должно — миграция 010
+// + INSERT-валидация гарантируют ≥1 элемент.
+func pickSNI(names []string) string {
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return names[0]
+	default:
+		return names[mrand.Intn(len(names))]
+	}
+}
 
 // generateSubscriptionToken — 24 байта случайности → 48 hex символов.
 // Примерно 192 бита энтропии, коллизии невозможны при любой разумной нагрузке.
@@ -267,7 +288,7 @@ func (s *VPNService) GenerateVLESSLink(ctx context.Context, userID int64, server
 	params.Add("security", "reality")
 	params.Add("pbk", server.PublicKey)
 	params.Add("fp", "chrome")
-	params.Add("sni", server.ServerNames)
+	params.Add("sni", pickSNI(server.ServerNames))
 	params.Add("sid", server.ShortID)
 	params.Add("type", "tcp")
 	params.Add("headerType", "none")

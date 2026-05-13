@@ -50,21 +50,27 @@ var ErrInvalidPayoutPercent = fmt.Errorf("payout_percent must be in [0, %d]", Ma
 // ErrPayoutWithoutPartner — нельзя задать процент без партнёра-получателя.
 var ErrPayoutWithoutPartner = errors.New("payout_percent requires partner_user_id")
 
+// ErrInvalidTrialDuration — override триала вне набора пресетов.
+// Совпадает с CHECK в миграции 004_campaign_trial_override.up.sql.
+var ErrInvalidTrialDuration = fmt.Errorf("trial_duration_days must be one of %v or null", model.AllowedTrialDurationDays)
+
 // NewCampaign — конструктор сервиса.
 func NewCampaign(repo *repository.Repository, cfg CampaignConfig, log *zap.Logger) *CampaignService {
 	return &CampaignService{repo: repo, cfg: cfg, log: log}
 }
 
 // CreateCampaignInput — параметры из gRPC API.
-//   PartnerUserID == 0 → без партнёра
-//   PayoutPercent == 0 → без выплат
+//   PartnerUserID == 0     → без партнёра
+//   PayoutPercent == 0     → без выплат
+//   TrialDurationDays == 0 → без override (дефолт 3 дня)
 type CreateCampaignInput struct {
-	Slug          string
-	Name          string
-	Notes         string
-	PartnerUserID int64
-	PayoutPercent int32
-	CreatedBy     int64
+	Slug              string
+	Name              string
+	Notes             string
+	PartnerUserID     int64
+	PayoutPercent     int32
+	CreatedBy         int64
+	TrialDurationDays int32
 }
 
 // Create — валидация + INSERT.
@@ -84,12 +90,22 @@ func (s *CampaignService) Create(ctx context.Context, in CreateCampaignInput) (*
 	if in.PayoutPercent > 0 && in.PartnerUserID == 0 {
 		return nil, ErrPayoutWithoutPartner
 	}
+	// trial_duration_days: 0 = без override; иначе должен быть в списке пресетов.
+	var trialPtr *int32
+	if in.TrialDurationDays != 0 {
+		v := in.TrialDurationDays
+		if !model.IsValidTrialDurationDays(&v) {
+			return nil, ErrInvalidTrialDuration
+		}
+		trialPtr = &v
+	}
 
 	c := &model.Campaign{
-		Slug:      in.Slug,
-		Name:      in.Name,
-		Notes:     in.Notes,
-		CreatedBy: in.CreatedBy,
+		Slug:              in.Slug,
+		Name:              in.Name,
+		Notes:             in.Notes,
+		CreatedBy:         in.CreatedBy,
+		TrialDurationDays: trialPtr,
 	}
 	if in.PartnerUserID > 0 {
 		c.PartnerUserID = &in.PartnerUserID
@@ -110,15 +126,18 @@ func (s *CampaignService) Create(ctx context.Context, in CreateCampaignInput) (*
 }
 
 // UpdateInput — частичное обновление. nil = "не менять".
-//   ClearPartner=true → обнуляет partner_user_id (использовать когда хотим
-//   убрать выплаты совсем, а не "оставить как было").
+//   ClearPartner=true        → обнуляет partner_user_id (использовать когда хотим
+//                              убрать выплаты совсем, а не "оставить как было").
+//   ClearTrialDuration=true  → возвращает дефолт 3 дня (NULL в БД).
 type UpdateCampaignInput struct {
-	Name           *string
-	Notes          *string
-	PartnerUserID  *int64
-	PayoutPercent  *int32
-	ClearPartner   bool
-	ClearPayout    bool
+	Name               *string
+	Notes              *string
+	PartnerUserID      *int64
+	PayoutPercent      *int32
+	ClearPartner       bool
+	ClearPayout        bool
+	TrialDurationDays  *int32
+	ClearTrialDuration bool
 }
 
 func (s *CampaignService) Update(ctx context.Context, id int64, in UpdateCampaignInput) (*model.Campaign, error) {
@@ -131,11 +150,18 @@ func (s *CampaignService) Update(ctx context.Context, id int64, in UpdateCampaig
 			return nil, ErrInvalidPayoutPercent
 		}
 	}
+	// trial-override: либо явное обнуление, либо валидный пресет, либо nil (не менять)
+	if !in.ClearTrialDuration && in.TrialDurationDays != nil {
+		if !model.IsValidTrialDurationDays(in.TrialDurationDays) {
+			return nil, ErrInvalidTrialDuration
+		}
+	}
 
 	if err := s.repo.UpdateCampaign(ctx, id,
 		in.Name, in.Notes,
 		in.PartnerUserID, in.PayoutPercent,
 		in.ClearPartner, in.ClearPayout,
+		in.TrialDurationDays, in.ClearTrialDuration,
 	); err != nil {
 		return nil, err
 	}

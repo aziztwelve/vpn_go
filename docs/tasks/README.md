@@ -35,6 +35,8 @@
 - [14-retire-germany-prod.md](./14-retire-germany-prod.md) — 🟡 Снять Germany (Hetzner) с prod-роутинга, оставить как dev/code-сервер (бэкенд + локальный Xray для тестов)
 - [15-retention-campaigns.md](./15-retention-campaigns.md) — 🟡 Retention-кампании (trial-ending, onboarding, churn) — segmentation engine + draft-approve flow
 - [16-rkn-resilience.md](./16-rkn-resilience.md) — 🟡 RKN-устойчивость control-plane: RU-mirror подписки, multi-domain, anonymous registrar, origin IP whitelist
-- [17-ru-vps-lte.md](./17-ru-vps-lte.md) — 🟡 RU-VPS для LTE-обхода (Yandex.Cloud) — Hetzner DE не пробивает агрессивный DPI операторов в Хакасии/Сибири, разведка инфры конкурента (geodataload.com)
+- [17-ru-vps-lte.md](./17-ru-vps-lte.md) — ⏸ Superseded by [20](./20-whitelisted-ru-vps.md): RU-VPS для LTE-обхода через Yandex.Cloud — YC выпал (TSPU фильтрует AS200350 отдельно), используем generic whitelisted VPS вместо
 - [18-bot-reply-keyboard.md](./18-bot-reply-keyboard.md) — 🔵 Reply-keyboard в боте: «🌐 Подключиться» + «🛒 Купить подписку» (заимствование UX EXTRA VPN, см. research/competitor-extravpn.md)
+- [19-campaign-trial-override.md](./19-campaign-trial-override.md) — кампания trial-override
+- [20-whitelisted-ru-vps.md](./20-whitelisted-ru-vps.md) — 🟡 Whitelisted RU-VPS для IP+SNI комбо-фильтра — поднять RU-relay на хостере с IP в `cidrwhitelist.txt` (Selectel/Beget/Cloud.ru), замена/дополнение tw1 NSK. Кандидаты выбраны, IP+хостинг подбираем по факту
 - [end_sni.md](./end_sni.md) — 🟢 **Финальный план SNI/RU-инфра (endgame)** — объединяет 12+13+17 в пошаговый roadmap: домен `qubexlabs.com` под VPN-ноды (✅ Stage 2 готов: домен + CF + лендинг), далее MWS RU-VPS, RealiTLScanner SNI-пулы, per-server keys

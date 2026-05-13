@@ -21,7 +21,7 @@ func fixtureServer2() *pb.Server {
 		Port:        8443,
 		PublicKey:   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij1234567",
 		ShortId:     "deadbeefcafe",
-		ServerNames: "github.com",
+		ServerNames: []string{"github.com"},
 		IsActive:    true,
 	}
 }

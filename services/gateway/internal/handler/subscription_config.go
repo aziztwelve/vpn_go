@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	mrand "math/rand"
 	"net/http"
 	"net/url"
 	"sort"
@@ -305,7 +306,9 @@ func buildVLESSLink(user *pb.VPNUser, srv *pb.Server, remarks string) string {
 	params.Set("flow", user.GetFlow())
 	params.Set("pbk", srv.GetPublicKey())
 	params.Set("sid", clientShortID(srv))
-	params.Set("sni", srv.GetServerNames())
+	// SNI рандомится per VLESS-link из пула — это и даёт декорреляцию
+	// последовательных коннектов клиента (см. end_sni.md Stage 1).
+	params.Set("sni", pickSNI(srv))
 	params.Set("fp", "chrome")
 	params.Set("spx", "/")
 
@@ -378,7 +381,7 @@ func writeJSONFormat(w http.ResponseWriter, cfg *pb.GetSubscriptionConfigRespons
 	// Каскадные priority-серверы (sni=apple.com) сохраняют DoH.
 	for _, srv := range priorityServers {
 		c := buildXrayConfig(user, srv, profileBypass)
-		if isRussianSNI(srv.GetServerNames()) {
+		if serverIsRussian(srv) {
 			c["dns"] = buildPlainDNS()
 		}
 		c["remarks"] = serverRemark(srv)
@@ -509,20 +512,57 @@ func buildPlainDNS() map[string]interface{} {
 	}
 }
 
-// isRussianSNI — server_names сервера в РУ-TLD (`.ru` / `.рф` / `.su` /
-// `.xn--p1ai` punycode .рф). Используется для детекции «LTE-style» серверов
-// без введения дополнительной колонки в БД: если SNI российский, сервер
-// предназначен для регионов с белым DPI-списком, ему нужен plain DNS.
-//
-// Этого хватает для нашего use-case: каскадный сервер тоже priority>0,
-// но его server_names = `apple.com` (то же что у обычных), поэтому он
-// корректно НЕ попадёт под override DNS и продолжит использовать DoH.
+// isRussianSNI — единичный SNI в РУ-TLD (`.ru` / `.рф` / `.su` / `.xn--p1ai`
+// punycode .рф). Низкоуровневый предикат — caller-у обычно нужен
+// serverIsRussian (по массиву server_names).
 func isRussianSNI(sni string) bool {
 	s := strings.ToLower(strings.TrimSpace(sni))
 	return strings.HasSuffix(s, ".ru") ||
 		strings.HasSuffix(s, ".рф") ||
 		strings.HasSuffix(s, ".su") ||
 		strings.HasSuffix(s, ".xn--p1ai")
+}
+
+// serverIsRussian — true если хотя бы один SNI в пуле сервера в РУ-TLD.
+// Используется для детекции «LTE-style» серверов без введения отдельной
+// колонки в БД: если у сервера хотя бы один RU SNI — он предназначен для
+// регионов с белым DPI-списком, ему нужен plain DNS и пустой shortId.
+//
+// На проде пул каждого сервера однороден (либо все RU SNI, либо все
+// не-RU); граничный case mixed-pool не должен возникать. ANY() выбран
+// для устойчивости — минимизирует риск что админ забыл и ровно один
+// элемент массива «провалился» в нужное правило.
+//
+// Каскадный priority-сервер (sni=apple.com) сохраняет DoH потому что в
+// его пуле нет RU SNI — это тот же контракт что был до миграции 010.
+func serverIsRussian(srv *pb.Server) bool {
+	for _, sni := range srv.GetServerNames() {
+		if isRussianSNI(sni) {
+			return true
+		}
+	}
+	return false
+}
+
+// pickSNI выбирает один SNI из пула сервера для текущей VLESS-link / Xray
+// конфига. Криптостойкость не нужна — это лишь декорреляция SNI у
+// последовательных коннектов чтобы не оставлять «один SNI на сервер»
+// фингерпринт. См. end_sni.md Stage 1.
+//
+// Контракт: если пул пуст — возвращаем "" (caller обычно интерпретирует
+// как «выдать сервер без SNI» — для Reality это сломает коннект, но не
+// упадёт билдер). Миграция 010 + INSERT-валидация гарантируют ≥1 элемент
+// на проде.
+func pickSNI(srv *pb.Server) string {
+	names := srv.GetServerNames()
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return names[0]
+	default:
+		return names[mrand.Intn(len(names))]
+	}
 }
 
 // clientShortID возвращает shortId, который должен попасть в клиентский
@@ -549,7 +589,7 @@ func isRussianSNI(sni string) bool {
 // Для не-RU SNI (apple.com, github.com, …) возвращаем обычный shortId
 // — там DPI у нас не палится, лишний риск не нужен.
 func clientShortID(srv *pb.Server) string {
-	if isRussianSNI(srv.GetServerNames()) {
+	if serverIsRussian(srv) {
 		return ""
 	}
 	return srv.GetShortId()
@@ -612,7 +652,9 @@ func buildOutbounds(user *pb.VPNUser, srv *pb.Server) []map[string]interface{} {
 				"realitySettings": map[string]interface{}{
 					"fingerprint": "chrome",
 					"publicKey":   srv.GetPublicKey(),
-					"serverName":  srv.GetServerNames(),
+					// serverName рандомится per Xray-конфиг из пула SNI
+					// — клиент использует это значение в TLS Hello.
+					"serverName":  pickSNI(srv),
 					"shortId":     clientShortID(srv),
 				},
 			},

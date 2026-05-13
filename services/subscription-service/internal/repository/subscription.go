@@ -283,10 +283,26 @@ func (r *SubscriptionRepository) StartTrialTx(ctx context.Context, userID int64,
 	}
 
 	// Создаём trial-подписку.
+	//
+	// Длительность триала может быть переопределена per-campaign (см. task 19).
+	// Резолвим override через JOIN на user_attribution (атрибуция уже зафиксирована
+	// до StartTrial — RegisterFromBot/ValidateTelegramUser делают её синхронно).
+	// Если override отсутствует / кампания заархивирована / атрибуции вообще нет
+	// → COALESCE падает на trialPlan.DurationDays (3 дня по дефолту).
 	sub := &model.Subscription{}
 	err = tx.QueryRow(ctx, `
 		INSERT INTO subscriptions (user_id, plan_id, max_devices, total_price, started_at, expires_at, status)
-		VALUES ($1, $2, $3, 0, NOW(), NOW() + INTERVAL '1 day' * $4, 'trial')
+		VALUES (
+		    $1, $2, $3, 0, NOW(),
+		    NOW() + INTERVAL '1 day' * COALESCE(
+		        (SELECT c.trial_duration_days
+		         FROM user_attribution ua
+		         JOIN campaigns c ON c.id = ua.campaign_id
+		         WHERE ua.user_id = $1 AND c.archived_at IS NULL),
+		        $4
+		    ),
+		    'trial'
+		)
 		RETURNING id, user_id, plan_id, max_devices, total_price, started_at, expires_at, status, created_at
 	`, userID, trialPlan.ID, trialPlan.MaxDevices, trialPlan.DurationDays).Scan(
 		&sub.ID, &sub.UserID, &sub.PlanID, &sub.MaxDevices, &sub.TotalPrice,

@@ -173,7 +173,7 @@ func (a *App) Start() error {
 	promoHandler := handler.NewPromoHandler(promoClient, a.paymentClient, a.logger)
 	// Регистрируем публичный /promo/p/{token} здесь — на root-роутере, без /api/v1.
 	router.Get("/promo/p/{token}", promoHandler.Redeem)
-	telegramBotHandler := handler.NewTelegramBotHandler(telegramClient, a.subscriptionClient, a.authClient, broadcastClient, promoClient, a.paymentClient, a.vpnClient, a.logger, a.config.Telegram.ChannelUsername)
+	telegramBotHandler := handler.NewTelegramBotHandler(telegramClient, a.subscriptionClient, a.authClient, broadcastClient, promoClient, a.paymentClient, a.vpnClient, a.referralClient, a.logger, a.config.Telegram.ChannelUsername)
 
 	// JWT middleware для защищённых ручек. Секрет — общий с Auth Service.
 	jwtMiddleware := authmw.JWTMiddleware(a.config.JWT.Secret)

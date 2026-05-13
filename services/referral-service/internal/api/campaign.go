@@ -32,12 +32,13 @@ func NewCampaign(svc *service.CampaignService, log *zap.Logger) *CampaignAPI {
 
 func (a *CampaignAPI) CreateCampaign(ctx context.Context, req *pb.CreateCampaignRequest) (*pb.Campaign, error) {
 	c, err := a.svc.Create(ctx, service.CreateCampaignInput{
-		Slug:          req.Slug,
-		Name:          req.Name,
-		Notes:         req.Notes,
-		PartnerUserID: req.PartnerUserId,
-		PayoutPercent: req.PayoutPercent,
-		CreatedBy:     req.CreatedByUserId,
+		Slug:              req.Slug,
+		Name:              req.Name,
+		Notes:             req.Notes,
+		PartnerUserID:     req.PartnerUserId,
+		PayoutPercent:     req.PayoutPercent,
+		CreatedBy:         req.CreatedByUserId,
+		TrialDurationDays: req.TrialDurationDays,
 	})
 	if err != nil {
 		return nil, mapCampaignErr(err)
@@ -80,6 +81,13 @@ func (a *CampaignAPI) UpdateCampaign(ctx context.Context, req *pb.UpdateCampaign
 	case req.PayoutPercent > 0:
 		v := req.PayoutPercent
 		in.PayoutPercent = &v
+	}
+	switch {
+	case req.TrialDurationDays == -1:
+		in.ClearTrialDuration = true
+	case req.TrialDurationDays > 0:
+		v := req.TrialDurationDays
+		in.TrialDurationDays = &v
 	}
 
 	c, err := a.svc.Update(ctx, req.Id, in)
@@ -174,6 +182,9 @@ func (a *CampaignAPI) toProto(c *model.Campaign) *pb.Campaign {
 	if c.ArchivedAt != nil {
 		out.ArchivedAt = c.ArchivedAt.Format(time.RFC3339)
 	}
+	if c.TrialDurationDays != nil {
+		out.TrialDurationDays = *c.TrialDurationDays
+	}
 	return out
 }
 
@@ -212,7 +223,8 @@ func mapCampaignErr(err error) error {
 		return status.Error(codes.AlreadyExists, "campaign slug already exists")
 	case errors.Is(err, service.ErrInvalidSlug),
 		errors.Is(err, service.ErrInvalidPayoutPercent),
-		errors.Is(err, service.ErrPayoutWithoutPartner):
+		errors.Is(err, service.ErrPayoutWithoutPartner),
+		errors.Is(err, service.ErrInvalidTrialDuration):
 		return status.Error(codes.InvalidArgument, err.Error())
 	default:
 		return status.Errorf(codes.Internal, "%v", err)

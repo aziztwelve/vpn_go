@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -43,6 +44,7 @@ type TelegramBotHandler struct {
 	promoClient        *client.PromoClient
 	paymentClient      *client.PaymentClient
 	vpnClient          *client.VPNClient
+	referralClient     *client.ReferralClient
 	logger             *zap.Logger
 	channelUsername    string
 }
@@ -55,6 +57,7 @@ func NewTelegramBotHandler(
 	promoClient *client.PromoClient,
 	paymentClient *client.PaymentClient,
 	vpnClient *client.VPNClient,
+	referralClient *client.ReferralClient,
 	logger *zap.Logger,
 	channelUsername string,
 ) *TelegramBotHandler {
@@ -66,6 +69,7 @@ func NewTelegramBotHandler(
 		promoClient:        promoClient,
 		paymentClient:      paymentClient,
 		vpnClient:          vpnClient,
+		referralClient:     referralClient,
 		logger:             logger,
 		channelUsername:    channelUsername,
 	}
@@ -209,9 +213,10 @@ func (h *TelegramBotHandler) handleCommand(ctx context.Context, msg *Message) {
 //   1. RecordBotStart — фиксируем нажатие в bot_starts (воронка).
 //   2. RegisterFromBot — upsert users + синхронная атрибуция ref_/src_
 //      (заменяет старый pending-flow + ValidateTelegramUser-обработку).
-//   3. Если юзер только что создан — StartTrial (3 дня) + CreateVPNUser
-//      (UUID в Xray). Этот шаг идентичен activateTrial в HTTP-handler'е,
-//      просто переехал на момент /start.
+//   3. Если юзер только что создан — StartTrial (длительность зависит от
+//      кампании, default 3 дня) + CreateVPNUser (UUID в Xray). Этот шаг
+//      идентичен activateTrial в HTTP-handler'е, просто переехал на /start.
+//      Фактическая длительность триала прокидывается в welcome-сообщение.
 //   4. sendStartMessage (welcome + inline) + sendPostStartLinkOrCTA
 //      (VLESS-ссылка либо CTA «купи подписку», с reply-keyboard внизу).
 //
@@ -255,7 +260,9 @@ func (h *TelegramBotHandler) handleStart(ctx context.Context, chatID, telegramUs
 			zap.Int64("telegram_id", telegramUserID),
 			zap.String("start_param", startParam),
 			zap.Error(err))
-		h.sendStartMessage(ctx, chatID, telegramUserID)
+		// trialDays=0 → строка про триал в welcome не покажется
+		// (RegisterFromBot упал, триал не активирован).
+		h.sendStartMessage(ctx, chatID, 0, 0)
 		h.sendPostStartLinkOrCTA(ctx, chatID, 0, telegramUserID)
 		return
 	}
@@ -271,24 +278,34 @@ func (h *TelegramBotHandler) handleStart(ctx context.Context, chatID, telegramUs
 	// Шаг 3: для новых юзеров активируем trial + регистрируем UUID в Xray.
 	// Best-effort: если хоть что-то упало — пишем warn и отдаём welcome.
 	// Юзер потом может довести инициализацию открытием Mini App.
+	//
+	// Возвращаемая длительность триала (динамическая, см. task 19) идёт в
+	// welcome-сообщение. Для existing-юзеров и при ошибках — 0 (= в welcome
+	// строка про триал не показывается, юзер просто видит «добро пожаловать»).
+	trialDays := 0
 	if regResp.IsNewUser {
-		h.activateTrialFromBot(ctx, telegramUserID, regResp.User.Id)
+		trialDays = h.activateTrialFromBot(ctx, telegramUserID, regResp.User.Id)
 	}
 
 	// Шаг 4: welcome (inline-кнопки) + 2-е сообщение с VLESS-ссылкой или
 	// CTA-фолбеком, в обоих случаях с reply-keyboard внизу чата.
-	h.sendStartMessage(ctx, chatID, telegramUserID)
+	h.sendStartMessage(ctx, chatID, regResp.User.Id, trialDays)
 	h.sendPostStartLinkOrCTA(ctx, chatID, regResp.User.Id, telegramUserID)
 }
 
 // activateTrialFromBot — копия activateTrial из AuthHandler для бот-flow.
 // Дёргает StartTrial (subscription-service) и CreateVPNUser (vpn-service).
 // Best-effort: ошибки логируем, но не возвращаем — UX от этого не зависит.
-func (h *TelegramBotHandler) activateTrialFromBot(ctx context.Context, telegramID, userID int64) {
+//
+// Возвращает фактическую длительность созданного триала в днях. 0 означает
+// «триал не создан» (skipped/already used/error/no client). Используется
+// в sendStartMessage чтобы показать актуальную цифру в welcome-тексте
+// (раньше было хардкоднутое "3 дня"; см. task 19 — per-campaign override).
+func (h *TelegramBotHandler) activateTrialFromBot(ctx context.Context, telegramID, userID int64) int {
 	if h.subscriptionClient == nil || h.vpnClient == nil {
 		h.logger.Warn("trial activation skipped: sub/vpn client not configured",
 			zap.Int64("user_id", userID))
-		return
+		return 0
 	}
 
 	trialResp, err := h.subscriptionClient.StartTrial(ctx, userID)
@@ -296,7 +313,7 @@ func (h *TelegramBotHandler) activateTrialFromBot(ctx context.Context, telegramI
 		h.logger.Error("StartTrial failed in /start flow",
 			zap.Int64("tg_id", telegramID),
 			zap.Int64("user_id", userID), zap.Error(err))
-		return
+		return 0
 	}
 	if trialResp.WasAlreadyUsed {
 		// Edge-case: auth-service сказал isNewUser=true (юзера в users не было),
@@ -304,13 +321,13 @@ func (h *TelegramBotHandler) activateTrialFromBot(ctx context.Context, telegramI
 		// ручном удалении users или race. Не дублируем подписку.
 		h.logger.Warn("trial was already used for fresh /start user",
 			zap.Int64("tg_id", telegramID), zap.Int64("user_id", userID))
-		return
+		return 0
 	}
 
 	if trialResp.Subscription == nil {
 		h.logger.Warn("StartTrial returned nil subscription",
 			zap.Int64("tg_id", telegramID), zap.Int64("user_id", userID))
-		return
+		return 0
 	}
 
 	if _, err := h.vpnClient.CreateVPNUser(ctx, userID, trialResp.Subscription.Id); err != nil {
@@ -321,28 +338,88 @@ func (h *TelegramBotHandler) activateTrialFromBot(ctx context.Context, telegramI
 			zap.Error(err))
 		// Подписка в БД есть, VPN-юзер не создан. Юзер заведётся при
 		// первом GetSubscriptionToken / при открытии Mini App.
-		return
+		// Длительность всё равно возвращаем — она уже отрисуется в welcome,
+		// а Xray-юзер дотянется при открытии Mini App.
 	}
+
+	days := trialDaysFromSubscription(trialResp.Subscription)
 
 	h.logger.Info("trial activated from /start",
 		zap.Int64("tg_id", telegramID),
 		zap.Int64("user_id", userID),
 		zap.Int64("subscription_id", trialResp.Subscription.Id),
+		zap.Int("trial_days", days),
 	)
+	return days
 }
 
-// sendStartMessage отправляет приветственное сообщение с кнопкой открытия Mini App
-func (h *TelegramBotHandler) sendStartMessage(ctx context.Context, chatID int64, userID int64) {
-	text := `👋 <b>Добро пожаловать в MaydaVPN!</b>
+// trialDaysFromSubscription парсит started_at/expires_at (RFC3339) и
+// возвращает длительность в днях, округлённую вверх. Если что-то не парсится —
+// 0 (welcome-сообщение в этом случае не покажет строку про триал).
+func trialDaysFromSubscription(sub *pb.Subscription) int {
+	if sub == nil {
+		return 0
+	}
+	start, err1 := time.Parse(time.RFC3339, sub.StartedAt)
+	end, err2 := time.Parse(time.RFC3339, sub.ExpiresAt)
+	if err1 != nil || err2 != nil || !end.After(start) {
+		return 0
+	}
+	// Round-up: 29.999h → 1 день, 30d − 1ms → 30 дней. На практике сервер
+	// возвращает ровные интервалы NOW() + INTERVAL N day, но защищаемся
+	// от возможного дрифта в ms.
+	hours := end.Sub(start).Hours()
+	days := int(hours / 24)
+	if int(hours)%24 != 0 {
+		days++
+	}
+	return days
+}
 
-🔒 Быстрый и безопасный VPN для вашей конфиденциальности
+// sendStartMessage отправляет приветственное сообщение с кнопкой открытия Mini App.
+//
+// trialDays — фактическая длительность только что активированного триала
+// (приходит из activateTrialFromBot → trialDaysFromSubscription). Если 0
+// (existing-юзер, триал не дали, или RegisterFromBot упал) — строка
+// «✨ Вы получили N дней…» в welcome не показывается. Раньше длительность
+// была хардкоднута как «3 дня», но после task 19 кампании могут переопределять
+// trial_duration_days, и хардкод врал юзерам с 7-/14-/30-дневным триалом.
+// userID здесь — internal users.id (НЕ telegram_id). Используется для
+// получения персональной реф-ссылки. 0 — если регистрация упала / юзера нет.
+func (h *TelegramBotHandler) sendStartMessage(ctx context.Context, chatID int64, userID int64, trialDays int) {
+	// Собираем текст по блокам — блок про триал опциональный. Header / footer
+	// без изменений (тот же копирайт что и до task 19).
+	var b strings.Builder
+	b.WriteString("👋 <b>Добро пожаловать в MaydaVPN!</b>\n\n")
+	b.WriteString("🔒 Быстрый и безопасный VPN для вашей конфиденциальности\n\n")
+	if trialDays > 0 {
+		fmt.Fprintf(&b, "✨ Вы получили <b>%s пробного периода</b>\n\n", pluralizeDays(trialDays))
+	}
 
-✨ Вы получили <b>3 дня пробного периода</b>
+	// Реф-блок: тянем личную ссылку из referral-service и собираем
+	// t.me/share/url. Если referral-service не подключён или вернул ошибку —
+	// пропускаем блок целиком (без share-кнопки), welcome продолжает работать.
+	// userID=0 (anonymous /start) тоже пропускаем — без юзера ссылку не выдадут.
+	shareURL := ""
+	if h.referralClient != nil && userID > 0 {
+		if refResp, err := h.referralClient.GetOrCreateLink(ctx, userID); err != nil {
+			h.logger.Warn("failed to get referral link for /start welcome",
+				zap.Int64("user_id", userID), zap.Error(err))
+		} else if refResp != nil && refResp.Url != "" {
+			b.WriteString("👥 <b>Приведи друга — получи +5 дней</b>\n")
+			b.WriteString("За каждого зарегистрировавшегося друга мы добавим\n")
+			b.WriteString("5 дней к твоей подписке. Жми «Поделиться» ниже 👇\n\n")
+			shareURL = "https://t.me/share/url?" + url.Values{
+				"url":  {refResp.Url},
+				"text": {"Подписывайся на MaydaVPN — быстро, без логов, без рекламы. Вот моя ссылка:"},
+			}.Encode()
+		}
+	}
 
-Подпишитесь на канал @maydavpn
-Техподдержка — @maydavpn_support
-
-Жми 👇🏻`
+	b.WriteString("Подпишитесь на канал @maydavpn\n")
+	b.WriteString("Техподдержка — @maydavpn_support\n\n")
+	b.WriteString("Жми 👇🏻")
+	text := b.String()
 
 	// Welcome-клавиатура: full-width "🚀 Открыть приложение" сверху + ряд из
 	// "🌐 Подключиться" / "🛒 Купить подписку" под ним. Последние две дублируют
@@ -350,20 +427,24 @@ func (h *TelegramBotHandler) sendStartMessage(ctx context.Context, chatID int64,
 	// мог сразу из welcome'а открыть карточку статуса или тарифы, не свайпая
 	// в reply-кнопки. Callback'и cbConnectPrompt/cbBuyPrompt в handleCallback
 	// проксируются на handleConnectButton/handleBuyButton.
-	keyboard := &telegram.InlineKeyboardMarkup{
-		InlineKeyboard: [][]telegram.InlineKeyboardButton{
+	rows := [][]telegram.InlineKeyboardButton{
+		{
 			{
-				{
-					Text:   "🚀 Открыть приложение",
-					WebApp: &telegram.WebAppInfo{URL: webAppRootURL},
-				},
-			},
-			{
-				{Text: replyBtnConnect, CallbackData: cbConnectPrompt},
-				{Text: replyBtnBuy, CallbackData: cbBuyPrompt},
+				Text:   "🚀 Открыть приложение",
+				WebApp: &telegram.WebAppInfo{URL: webAppRootURL},
 			},
 		},
 	}
+	if shareURL != "" {
+		rows = append(rows, []telegram.InlineKeyboardButton{
+			{Text: "📨 Поделиться с другом (+5 дней)", URL: shareURL},
+		})
+	}
+	rows = append(rows, []telegram.InlineKeyboardButton{
+		{Text: replyBtnConnect, CallbackData: cbConnectPrompt},
+		{Text: replyBtnBuy, CallbackData: cbBuyPrompt},
+	})
+	keyboard := &telegram.InlineKeyboardMarkup{InlineKeyboard: rows}
 
 	err := h.telegramClient.SendMessage(ctx, telegram.SendMessageParams{
 		ChatID:      chatID,

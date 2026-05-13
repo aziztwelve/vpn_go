@@ -138,7 +138,9 @@ func (a *App) seedLocalServer(ctx context.Context) error {
 		// serverов, которыми управляет наш VPN Service.
 		PrivateKey:  "",
 		ShortID:     a.config.Xray.RealityShortID,
-		Dest:        a.config.Xray.RealitySNI + ":443",
+		// dest = первый SNI в пуле (он же должен совпадать с
+		// realitySettings.dest у Xray в config.json), порт 443.
+		Dest:        firstOr(a.config.Xray.RealitySNI, "github.com") + ":443",
 		ServerNames: a.config.Xray.RealitySNI,
 		XrayAPIHost: a.config.Xray.APIHost,
 		XrayAPIPort: int32(a.config.Xray.APIPort),
@@ -155,6 +157,16 @@ func (a *App) seedLocalServer(ctx context.Context) error {
 		zap.String("inbound_tag", seeded.InboundTag),
 	)
 	return nil
+}
+
+// firstOr возвращает первый элемент slice или fallback если slice пуст.
+// Используется для seedLocalServer чтобы dest всегда был валидным
+// hostname:443 даже при пустом XRAY_REALITY_SNI.
+func firstOr(s []string, fallback string) string {
+	if len(s) == 0 {
+		return fallback
+	}
+	return s[0]
 }
 
 func (a *App) initDB() error {

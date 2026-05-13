@@ -69,7 +69,11 @@ func buildAutoOutbounds(user *pb.VPNUser, servers []*pb.Server) []map[string]int
 				"realitySettings": map[string]interface{}{
 					"fingerprint": "chrome",
 					"publicKey":   srv.GetPublicKey(),
-					"serverName":  srv.GetServerNames(),
+					// serverName рандомится per Xray-конфиг из пула,
+					// чтобы каждый proxy-N в auto-balancer'е цеплялся
+					// к разному cover-домену даже если это один и тот
+					// же физический VPS. См. end_sni.md Stage 1.
+					"serverName":  pickSNI(srv),
 					"shortId":     clientShortID(srv),
 				},
 			},

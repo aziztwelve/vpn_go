@@ -49,6 +49,11 @@ message Campaign {
 
   // Полный deep-link для шаринга (вычисляется на бэкенде из slug + bot username).
   string deep_link = 11;
+
+  // Override длительности триала для юзеров, пришедших по deep-link'у этой
+  // кампании (см. task 19). Допустимые значения: 0 (NULL = дефолт 3 дня),
+  // 3, 7, 15, 30, 60, 90.
+  int32 trial_duration_days = 12;
 }
 
 message CreateCampaignRequest {
@@ -58,6 +63,9 @@ message CreateCampaignRequest {
   int64 partner_user_id = 4;        // 0 = без партнёра
   int32 payout_percent = 5;         // 0 = без выплат
   int64 created_by_user_id = 6;     // gateway проставляет из JWT.user_id
+
+  // 0 = NULL (дефолт 3 дня); 3/7/15/30/60/90 = override.
+  int32 trial_duration_days = 7;
 }
 
 message UpdateCampaignRequest {
@@ -70,6 +78,9 @@ message UpdateCampaignRequest {
   int64 partner_user_id = 4;
   // Чтобы "обнулить" payout — передай -1.
   int32 payout_percent = 5;
+  // 0 = не менять, -1 = обнулить (вернуть к дефолту 3 дня),
+  // 3/7/15/30/60/90 = выставить override.
+  int32 trial_duration_days = 6;
 }
 
 message ArchiveCampaignRequest {

@@ -68,11 +68,13 @@ func (h *AdminCampaignsHandler) List(w http.ResponseWriter, r *http.Request) {
 // ─── Create ────────────────────────────────────────────────────────
 
 type createCampaignReq struct {
-	Slug          string `json:"slug"`
-	Name          string `json:"name"`
-	Notes         string `json:"notes"`
-	PartnerUserID int64  `json:"partner_user_id"`
-	PayoutPercent int32  `json:"payout_percent"`
+	Slug              string `json:"slug"`
+	Name              string `json:"name"`
+	Notes             string `json:"notes"`
+	PartnerUserID     int64  `json:"partner_user_id"`
+	PayoutPercent     int32  `json:"payout_percent"`
+	// 0 = без override (дефолт 3 дня); 3/7/15/30/60/90 = override (см. task 19).
+	TrialDurationDays int32  `json:"trial_duration_days"`
 }
 
 // POST /api/v1/admin/campaigns
@@ -87,12 +89,13 @@ func (h *AdminCampaignsHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, err := h.campaign.CreateCampaign(r.Context(), &campaignpb.CreateCampaignRequest{
-		Slug:            req.Slug,
-		Name:            req.Name,
-		Notes:           req.Notes,
-		PartnerUserId:   req.PartnerUserID,
-		PayoutPercent:   req.PayoutPercent,
-		CreatedByUserId: uid,
+		Slug:              req.Slug,
+		Name:              req.Name,
+		Notes:             req.Notes,
+		PartnerUserId:     req.PartnerUserID,
+		PayoutPercent:     req.PayoutPercent,
+		CreatedByUserId:   uid,
+		TrialDurationDays: req.TrialDurationDays,
 	})
 	if err != nil {
 		h.logger.Error("CreateCampaign failed",
@@ -127,10 +130,12 @@ func (h *AdminCampaignsHandler) Get(w http.ResponseWriter, r *http.Request) {
 // ─── Update (partial) ──────────────────────────────────────────────
 
 type updateCampaignReq struct {
-	Name          *string `json:"name"`
-	Notes         *string `json:"notes"`
-	PartnerUserID *int64  `json:"partner_user_id"` // -1 = clear
-	PayoutPercent *int32  `json:"payout_percent"`  // -1 = clear
+	Name              *string `json:"name"`
+	Notes             *string `json:"notes"`
+	PartnerUserID     *int64  `json:"partner_user_id"`     // -1 = clear
+	PayoutPercent     *int32  `json:"payout_percent"`      // -1 = clear
+	// nil = не менять; -1 = clear (вернуть к дефолту 3 дня); 3/7/15/30/60/90 = override.
+	TrialDurationDays *int32  `json:"trial_duration_days"`
 }
 
 // PATCH /api/v1/admin/campaigns/{id}
@@ -157,6 +162,9 @@ func (h *AdminCampaignsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.PayoutPercent != nil {
 		protoReq.PayoutPercent = *req.PayoutPercent
+	}
+	if req.TrialDurationDays != nil {
+		protoReq.TrialDurationDays = *req.TrialDurationDays
 	}
 
 	c, err := h.campaign.UpdateCampaign(r.Context(), protoReq)
@@ -216,19 +224,24 @@ func parseIDParam(w http.ResponseWriter, r *http.Request, name string) (int64, b
 }
 
 func campaignToJSON(c *campaignpb.Campaign) map[string]any {
-	return map[string]any{
-		"id":              c.Id,
-		"slug":            c.Slug,
-		"name":            c.Name,
-		"notes":           c.Notes,
-		"partner_user_id": c.PartnerUserId,
-		"payout_percent":  c.PayoutPercent,
-		"is_active":       c.IsActive,
-		"created_by":      c.CreatedBy,
-		"created_at":      c.CreatedAt,
-		"archived_at":     c.ArchivedAt,
-		"deep_link":       c.DeepLink,
+	out := map[string]any{
+		"id":                  c.Id,
+		"slug":                c.Slug,
+		"name":                c.Name,
+		"notes":               c.Notes,
+		"partner_user_id":     c.PartnerUserId,
+		"payout_percent":      c.PayoutPercent,
+		"is_active":           c.IsActive,
+		"created_by":          c.CreatedBy,
+		"created_at":          c.CreatedAt,
+		"archived_at":         c.ArchivedAt,
+		"deep_link":           c.DeepLink,
+		"trial_duration_days": nil,
 	}
+	if c.TrialDurationDays > 0 {
+		out["trial_duration_days"] = c.TrialDurationDays
+	}
+	return out
 }
 
 func statsToJSON(s *campaignpb.CampaignStats) map[string]any {

@@ -40,7 +40,7 @@ CREATE TABLE vpn_servers (
     private_key VARCHAR(100) NOT NULL, -- Reality private key (для конфига)
     short_id VARCHAR(50) NOT NULL,
     dest VARCHAR(255) NOT NULL DEFAULT 'github.com:443',
-    server_names JSONB NOT NULL DEFAULT '["github.com", "www.github.com"]',
+    server_names JSONB NOT NULL DEFAULT '["github.com"]'::jsonb,
     api_host VARCHAR(255) NOT NULL DEFAULT '127.0.0.1',
     api_port INT NOT NULL DEFAULT 10085,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
@@ -54,7 +54,7 @@ COMMENT ON COLUMN vpn_servers.public_key IS 'Reality public key для клие�
 COMMENT ON COLUMN vpn_servers.private_key IS 'Reality private key для сервера';
 COMMENT ON COLUMN vpn_servers.short_id IS 'Reality short ID';
 COMMENT ON COLUMN vpn_servers.dest IS 'Reality destination (маскировка)';
-COMMENT ON COLUMN vpn_servers.server_names IS 'SNI для Reality';
+COMMENT ON COLUMN vpn_servers.server_names IS 'JSONB array of SNI candidates for Reality. Gateway picks random element per VLESS-link.';
 COMMENT ON COLUMN vpn_servers.api_host IS 'Xray API host (обычно 127.0.0.1)';
 COMMENT ON COLUMN vpn_servers.api_port IS 'Xray API port (обычно 10085)';
 

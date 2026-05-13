@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -10,6 +11,42 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/vpn/vpn-service/internal/model"
 )
+
+// scanServerNames декодирует JSONB-колонку server_names в []string.
+// БД-инвариант (миграция 010): значение всегда валидный JSON-массив строк
+// длиной ≥1. Пустой/NULL не должно случаться, но защищаемся: при ошибке
+// возвращаем пустой slice — caller увидит len==0 и сможет логически
+// обработать (например, пропустить выдачу VLESS-link для этого сервера).
+func scanServerNames(raw []byte) ([]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var out []string
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("decode server_names: %w", err)
+	}
+	return out, nil
+}
+
+// marshalServerNames кодирует []string в JSONB-совместимую string.
+// Гарантия: если slice пустой/nil — возвращаем "[]" (валидный JSONB-массив),
+// а не "null", чтобы не нарушить NOT NULL constraint в БД.
+//
+// Возвращаем именно string, а не []byte: pgx5 для `[]byte` параметра в
+// колонку JSONB делает encode как bytea + неявный cast text→jsonb, что
+// иногда оборачивает payload в text-string-jsonb (вместо парсинга как
+// JSON). string-параметр идёт как plain text, и `$N::jsonb` парсит
+// его именно как JSON-литерал.
+func marshalServerNames(s []string) (string, error) {
+	if s == nil {
+		s = []string{}
+	}
+	b, err := json.Marshal(s)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
 
 type VPNRepository struct {
 	db *pgxpool.Pool
@@ -25,8 +62,13 @@ func NewVPNRepository(db *pgxpool.Pool) *VPNRepository {
 // загруженный сервер сверху. Если хочется иначе — handler в gateway сам
 // разделит servers на priority>0 и priority=0 (см. subscription_config.go).
 func (r *VPNRepository) ListServers(ctx context.Context, activeOnly bool) ([]*model.VPNServer, error) {
+	// server_names::text — детерминированный JSONB→text cast: pgx
+	// получит plain string, который мы парсим json.Unmarshal-ом
+	// (см. scanServerNames). Без cast'а pgx может вернуть уже
+	// декодированный объект в зависимости от TypeMap, что ломает
+	// scan в []byte.
 	query := `SELECT id, name, location, country_code, host, port, public_key, short_id, dest,
-		server_names, xray_api_host, xray_api_port, inbound_tag, is_active, load_percent,
+		server_names::text, xray_api_host, xray_api_port, inbound_tag, is_active, load_percent,
 		server_max_connections, description, created_at, priority
 		FROM vpn_servers`
 	if activeOnly {
@@ -43,13 +85,19 @@ func (r *VPNRepository) ListServers(ctx context.Context, activeOnly bool) ([]*mo
 	var servers []*model.VPNServer
 	for rows.Next() {
 		server := &model.VPNServer{}
+		var serverNamesText string
 		if err := rows.Scan(&server.ID, &server.Name, &server.Location, &server.CountryCode, &server.Host, &server.Port,
-			&server.PublicKey, &server.ShortID, &server.Dest, &server.ServerNames,
+			&server.PublicKey, &server.ShortID, &server.Dest, &serverNamesText,
 			&server.XrayAPIHost, &server.XrayAPIPort, &server.InboundTag,
 			&server.IsActive, &server.LoadPercent, &server.ServerMaxConnections, &server.Description,
 			&server.CreatedAt, &server.Priority); err != nil {
 			return nil, err
 		}
+		names, err := scanServerNames([]byte(serverNamesText))
+		if err != nil {
+			return nil, fmt.Errorf("server %d: %w", server.ID, err)
+		}
+		server.ServerNames = names
 		servers = append(servers, server)
 	}
 
@@ -57,20 +105,27 @@ func (r *VPNRepository) ListServers(ctx context.Context, activeOnly bool) ([]*mo
 }
 
 func (r *VPNRepository) GetServer(ctx context.Context, serverID int32) (*model.VPNServer, error) {
+	// server_names::text — см. ListServers выше.
 	query := `SELECT id, name, location, country_code, host, port, public_key, private_key, short_id, dest,
-		server_names, xray_api_host, xray_api_port, inbound_tag, is_active, load_percent,
+		server_names::text, xray_api_host, xray_api_port, inbound_tag, is_active, load_percent,
 		server_max_connections, description, created_at, priority FROM vpn_servers WHERE id = $1`
 
 	server := &model.VPNServer{}
+	var serverNamesText string
 	err := r.db.QueryRow(ctx, query, serverID).Scan(
 		&server.ID, &server.Name, &server.Location, &server.CountryCode, &server.Host, &server.Port,
-		&server.PublicKey, &server.PrivateKey, &server.ShortID, &server.Dest, &server.ServerNames,
+		&server.PublicKey, &server.PrivateKey, &server.ShortID, &server.Dest, &serverNamesText,
 		&server.XrayAPIHost, &server.XrayAPIPort, &server.InboundTag, &server.IsActive, &server.LoadPercent,
 		&server.ServerMaxConnections, &server.Description, &server.CreatedAt, &server.Priority,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get server: %w", err)
 	}
+	names, err := scanServerNames([]byte(serverNamesText))
+	if err != nil {
+		return nil, fmt.Errorf("server %d: %w", server.ID, err)
+	}
+	server.ServerNames = names
 
 	return server, nil
 }
@@ -100,7 +155,7 @@ func (r *VPNRepository) UpsertServerByHostPort(ctx context.Context, s *model.VPN
 			xray_api_host, xray_api_port, inbound_tag, is_active
 		) VALUES (
 			$1, $2, $3, $4, $5,
-			$6, $7, $8, $9, $10,
+			$6, $7, $8, $9, $10::jsonb,
 			$11, $12, $13, $14
 		)
 		ON CONFLICT (host, port) DO UPDATE SET
@@ -116,9 +171,13 @@ func (r *VPNRepository) UpsertServerByHostPort(ctx context.Context, s *model.VPN
 		          server_max_connections, description, created_at
 	`
 
-	err := r.db.QueryRow(ctx, query,
+	serverNamesRaw, err := marshalServerNames(s.ServerNames)
+	if err != nil {
+		return nil, fmt.Errorf("encode server_names: %w", err)
+	}
+	err = r.db.QueryRow(ctx, query,
 		s.Name, s.Location, s.CountryCode, s.Host, s.Port,
-		s.PublicKey, s.PrivateKey, s.ShortID, s.Dest, s.ServerNames,
+		s.PublicKey, s.PrivateKey, s.ShortID, s.Dest, serverNamesRaw,
 		s.XrayAPIHost, s.XrayAPIPort, s.InboundTag, s.IsActive,
 	).Scan(
 		&s.ID, &s.Name, &s.Location, &s.CountryCode, &s.IsActive,

@@ -1,8 +1,28 @@
 # 17. RU-VPS для LTE-обхода (Yandex Cloud / Selectel)
 
 **Дата:** 2026-05-07
-**Статус:** 🟡 Черновик — описано, реализуем позднее
+**Статус:** ⏸ **Superseded by [20-whitelisted-ru-vps.md](./20-whitelisted-ru-vps.md)** (2026-05-13)
 **Автор:** Devin + aziz
+
+> **Почему superseded:** изначальная гипотеза «Yandex Cloud решит проблему LTE»
+> опровергнута. TSPU фильтрует `AS200350 Yandex.Cloud LLC` **отдельно** от
+> `AS13238 YANDEX LLC` — preemptible YC-VM уже блокируются в Хакасии и других
+> проблемных регионах. См. [Sergei-thinker/vpn-setup README](https://github.com/Sergei-thinker/vpn-setup#важно-про-yandex-cloud)
+> и фидбек к [Habr 1021160](https://habr.com/articles/1021160/) (комменты
+> @paxlo, @aax, @Varpun).
+>
+> Задача 20 переосмысливает подход через
+> [hxehex/russia-mobile-internet-whitelist](https://github.com/hxehex/russia-mobile-internet-whitelist):
+> искать **любой** RU-хостинг чьи IP-блоки в `cidrwhitelist.txt`
+> (Selectel/Beget/Cloud.ru/etc.), а не привязываться к YC. Анализ AS-vs-whitelist
+> 36 хостеров и конкретные whitelisted /24 префиксы — в [20-whitelisted-ru-vps.md](./20-whitelisted-ru-vps.md).
+>
+> **Контекст ниже (разведка инфры конкурента geodataload.com, 2026-05-07)
+> остаётся полезным для понимания паттерна** — но решение «куда селиться»
+> принимаем уже в задаче 20.
+
+---
+
 **Триггер:** Юзер `@Tapdyg1` (Хакасия) — наш текущий `[LTE 1] Мобильный интернет`
 (id=144, Hetzner Falkenstein, 1443/ads.x5.ru) **не работает** на мобильном
 LTE-операторе, в то время как **конкурентский LTE-профиль работает**.

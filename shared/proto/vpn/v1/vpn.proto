@@ -180,7 +180,13 @@ message Server {
   string public_key = 7;
   string short_id = 8;
   string dest = 9;
-  string server_names = 10;
+  // server_names: пул SNI для Reality. Клиент-генератор VLESS-link
+  // (gateway) рандомит выбор per-link, разные коннекты с того же
+  // server.id используют разные cover-домены — антипаттерн «один SNI
+  // на сервер» решается. Массив должен содержать ≥1 элемент; первый
+  // обычно совпадает с realitySettings.dest на VPS. См. end_sni.md
+  // Stage 1 и docs/research/sni-pools.md.
+  repeated string server_names = 10;
   bool is_active = 11;
   int32 load_percent = 12;
   // priority: 0 — обычный сервер, >0 — «приоритетный» (эмитится сразу после

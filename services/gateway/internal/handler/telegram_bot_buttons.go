@@ -639,6 +639,31 @@ func humanDuration(days int32) string {
 	return fmt.Sprintf("%d дн.", days)
 }
 
+// pluralizeDays — "1 день" / "3 дня" / "30 дней" по правилам русского языка.
+// Используется в welcome-сообщении /start для динамической длительности
+// триала (см. task 19 — override через campaigns.trial_duration_days).
+//
+// Алгоритм классический:
+//   - Последние 2 цифры 11..19 → "дней" (исключение из правила единиц)
+//   - Иначе по последней цифре: 1 → "день", 2-4 → "дня", 0/5-9 → "дней"
+func pluralizeDays(n int) string {
+	if n < 0 {
+		n = -n
+	}
+	mod100 := n % 100
+	mod10 := n % 10
+	switch {
+	case mod100 >= 11 && mod100 <= 19:
+		return fmt.Sprintf("%d дней", n)
+	case mod10 == 1:
+		return fmt.Sprintf("%d день", n)
+	case mod10 >= 2 && mod10 <= 4:
+		return fmt.Sprintf("%d дня", n)
+	default:
+		return fmt.Sprintf("%d дней", n)
+	}
+}
+
 // formatRub — превращает "199.00" / "199" в "199" (без копеек, если их нет).
 // Wata/база хранят цену как Decimal-строку, у нас всегда целые рубли.
 func formatRub(s string) string {

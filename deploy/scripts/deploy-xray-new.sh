@@ -20,7 +20,13 @@
 #       --country DE \
 #       --host "de01.maydavpn.com" \
 #       --port 8443 \
-#       --max-conn 2000
+#       --max-conn 2000 \
+#       --sni "vk.com,max.ru,grishchenkov.ru,mail.hohlov.tech" \
+#       --dest "grishchenkov.ru:443"
+#
+# --sni принимает comma-separated пул SNI (см. end_sni.md Stage 1
+# multi-SNI). Минимум 1, обычно 4 (из RealiTLScanner-подобранного пула).
+# Первый элемент пула обычно совпадает с --dest (primary fallback цель).
 #
 # Почему по умолчанию :8443, а не :443:
 #   В РФ ТСПУ/РКН активно режут TLS-handshake (дропают Server Hello)
@@ -78,6 +84,34 @@ echo "   PublicKey:  $PUBLIC_KEY"
 echo "   ShortID:    $SHORT_ID"
 echo
 
+# --sni это comma-separated. Готовим:
+#   * SNI_JSON_ARRAY = JSON-массив для Xray realitySettings.serverNames + БД (JSONB).
+#   * SNI_FIRST      = первый элемент (для логов / при необходимости, --dest
+#                      обычно тоже его задаёт явно).
+SNI_JSON_ARRAY=$(jq -cnR --arg s "$SNI" '$s | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))')
+SNI_FIRST=$(printf '%s' "$SNI_JSON_ARRAY" | jq -r '.[0]')
+SNI_COUNT=$(printf '%s' "$SNI_JSON_ARRAY" | jq -r 'length')
+if [ "$SNI_COUNT" -lt 1 ]; then
+  echo "❌ --sni must contain at least 1 SNI" >&2
+  exit 1
+fi
+echo "✅ SNI pool ($SNI_COUNT): $SNI_JSON_ARRAY (first=$SNI_FIRST)"
+echo
+
+# Для RU-SNI inbound'ов (tag содержит "rusni" — наш стандарт) клиентский
+# shortId всегда пустая строка (см. clientShortID в subscription_config.go —
+# анти-DPI: операторы РФ fingerprint'ят 8-байт shortId в session_ticket).
+# Значит на сервере shortIds ДОЛЖЕН включать "" рядом с основным id,
+# иначе Reality verify упадёт у клиента → нет коннекта.
+# История: 2026-05-11 на tw1 первый раз поймали, фиксил руками через jq.
+if [[ "$INBOUND_TAG" == *rusni* ]]; then
+  SHORT_IDS_JSON=$(jq -cn --arg id "$SHORT_ID" '["", $id]')
+  echo "✅ RU-SNI inbound detected ('$INBOUND_TAG' ~ rusni) → shortIds = [\"\", \"$SHORT_ID\"] (анти-DPI, см. subscription_config.go::clientShortID)"
+else
+  SHORT_IDS_JSON=$(jq -cn --arg id "$SHORT_ID" '[$id]')
+fi
+echo
+
 # Сохраняем в артефакт на локальной машине.
 mkdir -p deploy/compose/xray-new
 OUT_DIR="deploy/compose/xray-new/$(echo "$NAME" | tr -cs 'A-Za-z0-9' '_')"
@@ -99,8 +133,8 @@ cat > "$OUT_DIR/config.json" <<EOF
         "network":"tcp","security":"reality",
         "realitySettings":{
           "show":false,"dest":"${DEST}","xver":0,
-          "serverNames":["${SNI}"],
-          "privateKey":"${PRIVATE_KEY}","shortIds":["${SHORT_ID}"]
+          "serverNames":${SNI_JSON_ARRAY},
+          "privateKey":"${PRIVATE_KEY}","shortIds":${SHORT_IDS_JSON}
         }
       },
       "sniffing":{"enabled":true,"destOverride":["http","tls","quic"]}
@@ -134,7 +168,7 @@ cat <<EOF
         server_max_connections, description
     ) VALUES (
         '${NAME}','${LOCATION}','${COUNTRY}','${HOST}',${PORT},
-        '${PUBLIC_KEY}','${PRIVATE_KEY}','${SHORT_ID}','${DEST}','${SNI}',
+        '${PUBLIC_KEY}','${PRIVATE_KEY}','${SHORT_ID}','${DEST}','${SNI_JSON_ARRAY}'::jsonb,
         '${HOST}',10085,'${INBOUND_TAG}',true,
         ${MAX_CONN},'${DESC_SQL}'
     ) RETURNING id;
